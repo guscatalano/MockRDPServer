@@ -1,0 +1,34 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+
+# .NET / VS
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+project.lock.json
+project.assets.json
+*.nuget.props
+*.nuget.targets
+
+# Rider / VS Code
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Test / coverage
+[Tt]est[Rr]esult*/
+*.trx
+coverage*.json
+coverage*.xml
