@@ -19,6 +19,8 @@ namespace MockRdp.Server;
 public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log)
 {
     private Stream _stream = tcp.GetStream();
+    private ushort _cliprdrChannelId;
+    private bool _offeredServerClipboard;
 
     public ConnectionState State { get; private set; } = ConnectionState.Initial;
 
@@ -91,9 +93,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         if (initialPacket is null) { log.LogWarning("Closed before MCS Connect-Initial."); return; }
 
         var userData = McsPdu.ReadConnectInitialUserData(Cotp.StripDataTpdu(initialPacket));
-        int channelCount = Gcc.ReadRequestedChannelCount(userData);
+        var channels = Gcc.ReadRequestedChannels(userData);
+        int channelCount = channels.Count;
+        int clipIndex = channels.FindIndex(n => string.Equals(n, "cliprdr", StringComparison.OrdinalIgnoreCase));
+        _cliprdrChannelId = clipIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + clipIndex) : (ushort)0;
         ushort userChannelId = (ushort)(Gcc.FirstVirtualChannelId + channelCount);
-        log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested.", channelCount);
+        log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested ({Names}).",
+            channelCount, string.Join(", ", channels));
 
         await WriteAsync(McsPdu.BuildConnectResponse(channelCount, (uint)RdpNegProtocol.Ssl), ct);
         log.LogInformation("Sent MCS Connect-Response (I/O=1003, VCs=1004..{Last}, user={User}).",
@@ -184,6 +190,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     State = ConnectionState.Active;
                     log.LogInformation("Finalization complete — session ACTIVE.");
                     await DrawTestPatternAsync(ct);
+                    await InitClipboardAsync(ct);
                     await ServeAsync(ct);
                     return;
                 }
@@ -213,9 +220,59 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
             if (frame.Value.FastPath)
                 await HandleInputAsync(frame.Value.Header, frame.Value.Payload, ct);
-            // Slow-path frames in the active phase (keep-alives, refresh rect, …) are ignored.
+            else
+                await HandleSlowPathAsync(frame.Value.Payload, ct);
         }
     }
+
+    /// <summary>M6: sends the clipboard capabilities + monitor-ready that start the CLIPRDR exchange.</summary>
+    private async Task InitClipboardAsync(CancellationToken ct)
+    {
+        if (_cliprdrChannelId == 0) return;
+        await SendClipboardAsync(Clipboard.ClipboardCapabilities(), ct);
+        await SendClipboardAsync(Clipboard.MonitorReady(), ct);
+        log.LogInformation("Clipboard channel ready on {Channel} (caps + monitor ready).", _cliprdrChannelId);
+    }
+
+    /// <summary>Routes a slow-path Send Data PDU; clipboard channel data goes to CLIPRDR handling.</summary>
+    private async Task HandleSlowPathAsync(byte[] tpdu, CancellationToken ct)
+    {
+        var mcs = Cotp.StripDataTpdu(tpdu);
+        if (McsPdu.ClassifyDomainPdu(mcs) != McsDomainPdu.SendDataRequest) return;
+
+        var (channelId, data) = McsPdu.ParseSendData(mcs);
+        if (channelId == _cliprdrChannelId && _cliprdrChannelId != 0)
+            await HandleClipboardAsync(VirtualChannel.Unwrap(data).ToArray(), ct);
+    }
+
+    /// <summary>Handles one CLIPRDR PDU: acks format lists, offers text, and serves it on request.</summary>
+    private async Task HandleClipboardAsync(byte[] clipPdu, CancellationToken ct)
+    {
+        switch (Clipboard.ReadMsgType(clipPdu))
+        {
+            case Clipboard.CbFormatList:
+                await SendClipboardAsync(Clipboard.FormatListResponseOk(), ct);
+                if (!_offeredServerClipboard)
+                {
+                    _offeredServerClipboard = true;
+                    await SendClipboardAsync(Clipboard.FormatListUnicodeText(), ct);
+                    log.LogInformation("Clipboard: acked client format list and offered CF_UNICODETEXT.");
+                }
+                break;
+
+            case Clipboard.CbFormatDataRequest:
+                await SendClipboardAsync(Clipboard.FormatDataResponseText(Clipboard.ServedText), ct);
+                log.LogInformation("Clipboard: served text on format data request.");
+                break;
+
+            case Clipboard.CbClipCaps:
+                log.LogDebug("Clipboard: client capabilities received.");
+                break;
+        }
+    }
+
+    private Task SendClipboardAsync(byte[] cliprdrPdu, CancellationToken ct) =>
+        WriteAsync(McsPdu.BuildSendDataIndication(_cliprdrChannelId, VirtualChannel.Wrap(cliprdrPdu)), ct);
 
     /// <summary>Decodes fast-path input and draws a marker where the mouse moves/clicks.</summary>
     private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)

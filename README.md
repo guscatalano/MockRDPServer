@@ -15,7 +15,11 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 | M3 | Licensing + capabilities + finalization → blank desktop | ✅ done |
 | M4 | Graphics (bitmap updates) | ✅ done |
 | M5 | Keyboard/mouse input | ✅ done |
-| M6 | Clipboard virtual channel (CLIPRDR) | next |
+| M6 | Clipboard virtual channel (CLIPRDR) | ✅ done |
+
+All originally planned milestones are complete: a real RDP client (FreeRDP verified,
+mstsc not yet tested) connects end-to-end, sees rendered graphics, drives the screen
+with keyboard/mouse, and exchanges clipboard text over the `cliprdr` channel.
 
 Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred.
 

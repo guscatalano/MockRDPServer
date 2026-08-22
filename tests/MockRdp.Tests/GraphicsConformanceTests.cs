@@ -26,16 +26,14 @@ public class GraphicsConformanceTests
         await McsClient.ActivateAsync(client, user, ct);
 
         // First bitmap update: a 64x64 red square at the origin.
-        var first = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
-        var (x, y, w, h, bpp, pixel) = McsClient.ParseFirstBitmap(first.Payload);
+        var (x, y, w, h, bpp, pixel) = McsClient.ParseFirstBitmap(await McsClient.ReadIoBitmapAsync(client, ct));
 
         Assert.Equal((0, 0, 64, 64), (x, y, w, h));
         Assert.Equal(16, bpp);
         Assert.Equal(Graphics.Rgb565(255, 0, 0), pixel);
 
         // Second bitmap update: a green square at x=64.
-        var second = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
-        var g = McsClient.ParseFirstBitmap(second.Payload);
+        var g = McsClient.ParseFirstBitmap(await McsClient.ReadIoBitmapAsync(client, ct));
         Assert.Equal((64, 0), (g.X, g.Y));
         Assert.Equal(Graphics.Rgb565(0, 255, 0), g.FirstPixel);
     }

@@ -64,6 +64,41 @@ public static class Gcc
     }
 
     /// <summary>
+    /// Reads the requested virtual-channel names in order from CS_NET. The channel ID for the
+    /// name at index i is <see cref="FirstVirtualChannelId"/> + i.
+    /// </summary>
+    public static List<string> ReadRequestedChannels(ReadOnlySpan<byte> connectInitialUserData)
+    {
+        var names = new List<string>();
+        int keyIdx = IndexOf(connectInitialUserData, ClientKeyDuca);
+        if (keyIdx < 0) return names;
+        int pos = keyIdx + ClientKeyDuca.Length;
+        _ = Asn1.ReadPerLength(connectInitialUserData, ref pos);
+
+        while (pos + 4 <= connectInitialUserData.Length)
+        {
+            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(connectInitialUserData.Slice(pos, 2));
+            ushort len = BinaryPrimitives.ReadUInt16LittleEndian(connectInitialUserData.Slice(pos + 2, 2));
+            if (len < 4) break;
+            if (type == CsNet && pos + 8 <= connectInitialUserData.Length)
+            {
+                int count = (int)BinaryPrimitives.ReadUInt32LittleEndian(connectInitialUserData.Slice(pos + 4, 4));
+                int cpos = pos + 8;
+                for (int i = 0; i < count && cpos + 12 <= connectInitialUserData.Length; i++)
+                {
+                    var raw = connectInitialUserData.Slice(cpos, 8);
+                    int nul = raw.IndexOf((byte)0);
+                    names.Add(System.Text.Encoding.ASCII.GetString(nul < 0 ? raw : raw[..nul]));
+                    cpos += 12; // 8-byte name + 4-byte options
+                }
+                break;
+            }
+            pos += len;
+        }
+        return names;
+    }
+
+    /// <summary>
     /// Builds the GCC Conference Create Response user data (server core/network/security blocks),
     /// advertising the I/O channel plus <paramref name="channelCount"/> virtual channels
     /// (1004, 1005, …). This is the OCTET STRING placed in the MCS Connect-Response userData.

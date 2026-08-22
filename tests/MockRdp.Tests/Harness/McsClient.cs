@@ -203,6 +203,33 @@ public static class McsClient
         for (int i = 0; i < 4; i++) await client.ReadTpktPayloadAsync(ct); // server finalization
     }
 
+    /// <summary>Sends a CLIPRDR PDU on the clipboard channel (wrapped in a Channel PDU Header).</summary>
+    public static Task SendClipboardAsync(RdpTestClient client, ushort user, ushort cliprdrChannel, byte[] cliprdrPdu, CancellationToken ct) =>
+        client.WriteRawAsync(SendDataRequest(user, cliprdrChannel, VirtualChannel.Wrap(cliprdrPdu)), ct);
+
+    /// <summary>Reads TPKT frames until one arrives on the clipboard channel; returns its CLIPRDR PDU.</summary>
+    public static async Task<byte[]> ReadClipboardAsync(RdpTestClient client, ushort cliprdrChannel, CancellationToken ct)
+    {
+        while (true)
+        {
+            var (channelId, data) = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
+            if (channelId == cliprdrChannel)
+                return VirtualChannel.Unwrap(data).ToArray();
+            // Otherwise it's an I/O-channel frame (e.g. a bitmap update) — skip it.
+        }
+    }
+
+    /// <summary>Reads TPKT frames until one arrives on the I/O channel; returns its share control PDU.</summary>
+    public static async Task<byte[]> ReadIoBitmapAsync(RdpTestClient client, CancellationToken ct)
+    {
+        while (true)
+        {
+            var (channelId, data) = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
+            if (channelId == Gcc.IoChannelId)
+                return data;
+        }
+    }
+
     /// <summary>Parses the first rectangle of a Bitmap Update PDU (share control payload).</summary>
     public static (int X, int Y, int Width, int Height, int Bpp, ushort FirstPixel) ParseFirstBitmap(ReadOnlySpan<byte> pdu)
     {

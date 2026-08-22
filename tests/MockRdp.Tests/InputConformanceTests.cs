@@ -25,15 +25,15 @@ public class InputConformanceTests
         ushort user = await McsClient.NegotiateThroughChannelJoinAsync(client, server.Endpoint, Channels, ct);
         await McsClient.ActivateAsync(client, user, ct);
 
-        // Drain the startup test pattern (one bitmap update per square).
+        // Drain the startup test pattern (one I/O-channel bitmap update per square).
         for (int i = 0; i < Graphics.TestPattern().Count; i++)
-            await client.ReadTpktPayloadAsync(ct);
+            await McsClient.ReadIoBitmapAsync(client, ct);
 
         // Move the mouse; the server should draw a marker at that position.
         await client.WriteRawAsync(McsClient.BuildFastPathMouse(Input.PtrFlagsMove, 200, 150), ct);
 
-        var marker = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
-        var (x, y, w, h, _, pixel) = McsClient.ParseFirstBitmap(marker.Payload);
+        var marker = await McsClient.ReadIoBitmapAsync(client, ct);
+        var (x, y, w, h, _, pixel) = McsClient.ParseFirstBitmap(marker);
 
         Assert.Equal((200, 150, 16, 16), (x, y, w, h));
         Assert.Equal(Graphics.Rgb565(255, 255, 0), pixel); // yellow marker
