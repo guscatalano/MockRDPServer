@@ -176,6 +176,27 @@ public static class McsClient
         return SendDataRequest(userId, Gcc.IoChannelId, pdu);
     }
 
+    /// <summary>Completes licensing, capability exchange and finalization for an already-joined client.</summary>
+    public static async Task ActivateAsync(RdpTestClient client, ushort user, CancellationToken ct)
+    {
+        await client.WriteRawAsync(BuildClientInfo(user), ct);
+        await client.ReadTpktPayloadAsync(ct); // licensing
+        await client.ReadTpktPayloadAsync(ct); // Demand Active
+        await client.WriteRawAsync(BuildConfirmActive(user, Capabilities.ShareId), ct);
+        await client.WriteRawAsync(BuildFontList(user), ct);
+        for (int i = 0; i < 4; i++) await client.ReadTpktPayloadAsync(ct); // server finalization
+    }
+
+    /// <summary>Parses the first rectangle of a Bitmap Update PDU (share control payload).</summary>
+    public static (int X, int Y, int Width, int Height, int Bpp, ushort FirstPixel) ParseFirstBitmap(ReadOnlySpan<byte> pdu)
+    {
+        static ushort U16(ReadOnlySpan<byte> b, int p) => BinaryPrimitives.ReadUInt16LittleEndian(b.Slice(p, 2));
+        // Layout after share control(6) + share data header(12) = offset 18:
+        // updateType(18) numberRectangles(20) destLeft(22) destTop(24) destRight(26)
+        // destBottom(28) width(30) height(32) bpp(34) flags(36) bitmapLength(38) pixels(40).
+        return (U16(pdu, 22), U16(pdu, 24), U16(pdu, 30), U16(pdu, 32), U16(pdu, 34), U16(pdu, 40));
+    }
+
     /// <summary>Drives a client through negotiation, TLS, MCS connect and channel join; returns the user channel.</summary>
     public static async Task<ushort> NegotiateThroughChannelJoinAsync(
         RdpTestClient client, System.Net.IPEndPoint endpoint, string[] channels, CancellationToken ct)

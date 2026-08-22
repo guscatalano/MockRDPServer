@@ -182,7 +182,9 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlGranted(userChannelId)), ct);
                     await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildFontMap()), ct);
                     State = ConnectionState.Active;
-                    log.LogInformation("Finalization complete — session ACTIVE (blank desktop). [M3 complete — graphics not yet implemented]");
+                    log.LogInformation("Finalization complete — session ACTIVE.");
+                    await DrawTestPatternAsync(ct);
+                    await ServeAsync(ct);
                     return;
                 }
             }
@@ -191,6 +193,62 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 log.LogDebug("Activation PDU with share-control type {Type}.", pduType);
             }
         }
+    }
+
+    /// <summary>M4: draws the startup test pattern (a row of colour squares) via bitmap updates.</summary>
+    private async Task DrawTestPatternAsync(CancellationToken ct)
+    {
+        foreach (var square in Graphics.TestPattern())
+            await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
+        log.LogInformation("Sent startup test pattern ({Count} bitmap updates).", Graphics.TestPattern().Count);
+    }
+
+    /// <summary>Keeps the active session alive, draining client frames (input handled in M5).</summary>
+    private async Task ServeAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var frame = await ReadAnyFrameAsync(ct);
+            if (frame is null) { log.LogInformation("Client disconnected from active session."); return; }
+        }
+    }
+
+    /// <summary>Reads one frame, transparently handling both TPKT (slow-path) and fast-path framing.</summary>
+    private async Task<byte[]?> ReadAnyFrameAsync(CancellationToken ct)
+    {
+        var first = new byte[1];
+        try { await _stream.ReadExactlyAsync(first, ct); }
+        catch (EndOfStreamException) { return null; }
+
+        if (first[0] == Tpkt.Version)
+        {
+            var rest = new byte[3];
+            await _stream.ReadExactlyAsync(rest, ct);
+            int total = (rest[1] << 8) | rest[2];
+            var body = new byte[Math.Max(0, total - Tpkt.HeaderLength)];
+            await _stream.ReadExactlyAsync(body, ct);
+            return body;
+        }
+
+        // Fast-path output/input framing: action byte, then a 1- or 2-byte length.
+        var l1 = new byte[1];
+        await _stream.ReadExactlyAsync(l1, ct);
+        int length, headerLen;
+        if ((l1[0] & 0x80) != 0)
+        {
+            var l2 = new byte[1];
+            await _stream.ReadExactlyAsync(l2, ct);
+            length = ((l1[0] & 0x7F) << 8) | l2[0];
+            headerLen = 3;
+        }
+        else
+        {
+            length = l1[0];
+            headerLen = 2;
+        }
+        var payload = new byte[Math.Max(0, length - headerLen)];
+        await _stream.ReadExactlyAsync(payload, ct);
+        return payload;
     }
 
     /// <summary>Reads one TPKT-framed packet and returns the X.224 TPDU (payload after the 4-byte header).</summary>

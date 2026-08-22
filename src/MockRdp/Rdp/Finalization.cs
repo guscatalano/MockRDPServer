@@ -21,21 +21,9 @@ public static class Finalization
     private const ushort CtrlActionCooperate = 0x0004;
     private const ushort CtrlActionGrantedControl = 0x0002;
 
-    /// <summary>Wraps type-specific data in a Share Data Header + Share Control Header (a Data PDU).</summary>
-    public static byte[] BuildDataPdu(byte pduType2, ReadOnlySpan<byte> data)
-    {
-        var body = new ByteWriter();
-        int total = 6 + 12 + data.Length; // share control (6) + share data header (12) + data
-        body.WriteUInt32LE(Capabilities.ShareId);
-        body.WriteUInt8(0);                  // pad1
-        body.WriteUInt8(1);                  // streamId = STREAM_LOW
-        body.WriteUInt16LE((ushort)total);   // uncompressedLength
-        body.WriteUInt8(pduType2);
-        body.WriteUInt8(0);                  // compressedType
-        body.WriteUInt16LE(0);               // compressedLength
-        body.WriteBytes(data);
-        return ShareControl.Wrap(ShareControl.Data, Gcc.ServerChannelId, body.AsSpan());
-    }
+    /// <summary>Wraps type-specific data in a server Data PDU (Share Data Header + Share Control Header).</summary>
+    public static byte[] BuildDataPdu(byte pduType2, ReadOnlySpan<byte> data) =>
+        ShareControl.BuildDataPdu(Capabilities.ShareId, Gcc.ServerChannelId, pduType2, data);
 
     public static byte[] BuildSynchronize(ushort targetUser)
     {

@@ -13,8 +13,8 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 | M1 | TCP + TPKT + X.224 negotiation + TLS | ✅ done |
 | M2 | MCS connect + channel join | ✅ done |
 | M3 | Licensing + capabilities + finalization → blank desktop | ✅ done |
-| M4 | Graphics (bitmap updates) | next |
-| M5 | Keyboard/mouse input | |
+| M4 | Graphics (bitmap updates) | ✅ done |
+| M5 | Keyboard/mouse input | next |
 | M6 | Clipboard virtual channel (CLIPRDR) | |
 
 Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred.
