@@ -7,6 +7,7 @@ using MockRdp.Transport;
 int port = 3389;
 var logLevel = LogLevel.Information;
 var bind = IPAddress.Any;
+string? certOut = null;
 
 for (int i = 0; i < args.Length - 1; i++)
 {
@@ -14,6 +15,7 @@ for (int i = 0; i < args.Length - 1; i++)
     {
         case "--port": port = int.Parse(args[++i]); break;
         case "--bind": bind = IPAddress.Parse(args[++i]); break;
+        case "--cert-out": certOut = args[++i]; break;
         case "--log-level":
             logLevel = args[++i].ToLowerInvariant() switch
             {
@@ -37,6 +39,11 @@ using var loggerFactory = LoggerFactory.Create(b => b
     }));
 
 var cert = CertProvider.CreateSelfSigned();
+if (certOut is not null)
+{
+    File.WriteAllBytes(certOut, cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert));
+    loggerFactory.CreateLogger("Program").LogInformation("Exported server certificate to {Path}", certOut);
+}
 using var listener = new RdpListener(bind, port, cert, loggerFactory);
 listener.Start();
 

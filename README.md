@@ -17,9 +17,11 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 | M5 | Keyboard/mouse input | ✅ done |
 | M6 | Clipboard virtual channel (CLIPRDR) | ✅ done |
 
-All originally planned milestones are complete: a real RDP client (FreeRDP verified,
-mstsc not yet tested) connects end-to-end, sees rendered graphics, drives the screen
-with keyboard/mouse, and exchanges clipboard text over the `cliprdr` channel.
+All originally planned milestones are complete: a real RDP client connects end-to-end,
+sees rendered graphics, drives the screen with keyboard/mouse, and exchanges clipboard
+text over the `cliprdr` channel. Verified against **FreeRDP** and against **mstscax** —
+the ActiveX control that is `mstsc.exe`'s own engine — so the mock is mstsc-grade. See
+`tools/RdpAxClient/` for the mstscax-based test client.
 
 Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred.
 

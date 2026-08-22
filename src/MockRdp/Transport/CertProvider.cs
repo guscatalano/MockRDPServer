@@ -23,7 +23,9 @@ public static class CertProvider
 
         var san = new SubjectAlternativeNameBuilder();
         san.AddDnsName(commonName);
+        san.AddDnsName("localhost");
         san.AddDnsName(Environment.MachineName);
+        san.AddIpAddress(System.Net.IPAddress.Loopback);
         req.CertificateExtensions.Add(san.Build());
 
         using var cert = req.CreateSelfSigned(

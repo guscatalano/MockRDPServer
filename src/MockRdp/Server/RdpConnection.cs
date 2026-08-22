@@ -58,7 +58,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             return;
         }
 
-        await WriteAsync(Cotp.BuildConnectionConfirm(RdpNegProtocol.Ssl), ct);
+        // EXTENDED_CLIENT_DATA_SUPPORTED (0x01): required by mstsc/mstscax to advance past TLS.
+        await WriteAsync(Cotp.BuildConnectionConfirm(RdpNegProtocol.Ssl, negRspFlags: 0x01), ct);
         log.LogInformation("Sent Connection Confirm selecting PROTOCOL_SSL; starting TLS handshake.");
 
         var ssl = new SslStream(_stream, leaveInnerStreamOpen: false);
