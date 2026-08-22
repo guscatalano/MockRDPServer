@@ -203,18 +203,52 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("Sent startup test pattern ({Count} bitmap updates).", Graphics.TestPattern().Count);
     }
 
-    /// <summary>Keeps the active session alive, draining client frames (input handled in M5).</summary>
+    /// <summary>M5: keeps the active session alive, reacting to client input.</summary>
     private async Task ServeAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            var frame = await ReadAnyFrameAsync(ct);
+            var frame = await ReadFrameAsync(ct);
             if (frame is null) { log.LogInformation("Client disconnected from active session."); return; }
+
+            if (frame.Value.FastPath)
+                await HandleInputAsync(frame.Value.Header, frame.Value.Payload, ct);
+            // Slow-path frames in the active phase (keep-alives, refresh rect, …) are ignored.
         }
     }
 
-    /// <summary>Reads one frame, transparently handling both TPKT (slow-path) and fast-path framing.</summary>
-    private async Task<byte[]?> ReadAnyFrameAsync(CancellationToken ct)
+    /// <summary>Decodes fast-path input and draws a marker where the mouse moves/clicks.</summary>
+    private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)
+    {
+        foreach (var ev in Input.ParseFastPath(fastPathHeader, payload))
+        {
+            switch (ev.Type)
+            {
+                case InputEventType.Mouse:
+                    await DrawMarkerAsync(ev.X, ev.Y, ct);
+                    break;
+                case InputEventType.Scancode:
+                    log.LogDebug("Key: scancode 0x{Code:X2} flags 0x{Flags:X2}.", ev.Code, ev.Flags);
+                    break;
+                case InputEventType.Unicode:
+                    log.LogDebug("Key: unicode U+{Code:X4}.", ev.X);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Draws a small marker square at the cursor position (clamped to the desktop).</summary>
+    private async Task DrawMarkerAsync(ushort x, ushort y, CancellationToken ct)
+    {
+        const int size = 16;
+        int mx = Math.Clamp((int)x, 0, Capabilities.DesktopWidth - size);
+        int my = Math.Clamp((int)y, 0, Capabilities.DesktopHeight - size);
+        var square = new Graphics.Square(mx, my, size, Graphics.Rgb565(255, 255, 0)); // yellow
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
+    }
+
+    /// <summary>Reads one frame, distinguishing TPKT (slow-path) from fast-path framing.</summary>
+    private async Task<(bool FastPath, byte Header, byte[] Payload)?> ReadFrameAsync(CancellationToken ct)
     {
         var first = new byte[1];
         try { await _stream.ReadExactlyAsync(first, ct); }
@@ -227,10 +261,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             int total = (rest[1] << 8) | rest[2];
             var body = new byte[Math.Max(0, total - Tpkt.HeaderLength)];
             await _stream.ReadExactlyAsync(body, ct);
-            return body;
+            return (false, first[0], body);
         }
 
-        // Fast-path output/input framing: action byte, then a 1- or 2-byte length.
+        // Fast-path framing: the header byte is `first`, then a 1- or 2-byte length.
         var l1 = new byte[1];
         await _stream.ReadExactlyAsync(l1, ct);
         int length, headerLen;
@@ -248,7 +282,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
         var payload = new byte[Math.Max(0, length - headerLen)];
         await _stream.ReadExactlyAsync(payload, ct);
-        return payload;
+        return (true, first[0], payload);
     }
 
     /// <summary>Reads one TPKT-framed packet and returns the X.224 TPDU (payload after the 4-byte header).</summary>

@@ -14,8 +14,8 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 | M2 | MCS connect + channel join | ✅ done |
 | M3 | Licensing + capabilities + finalization → blank desktop | ✅ done |
 | M4 | Graphics (bitmap updates) | ✅ done |
-| M5 | Keyboard/mouse input | next |
-| M6 | Clipboard virtual channel (CLIPRDR) | |
+| M5 | Keyboard/mouse input | ✅ done |
+| M6 | Clipboard virtual channel (CLIPRDR) | next |
 
 Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred.
 

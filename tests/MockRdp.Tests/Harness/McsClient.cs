@@ -176,6 +176,22 @@ public static class McsClient
         return SendDataRequest(userId, Gcc.IoChannelId, pdu);
     }
 
+    /// <summary>Builds a fast-path input frame carrying a single mouse event.</summary>
+    public static byte[] BuildFastPathMouse(ushort pointerFlags, ushort x, ushort y)
+    {
+        var ev = new ByteWriter();
+        ev.WriteUInt8(0x20);            // eventHeader: FASTPATH_INPUT_EVENT_MOUSE (code 1 << 5)
+        ev.WriteUInt16LE(pointerFlags);
+        ev.WriteUInt16LE(x);
+        ev.WriteUInt16LE(y);
+
+        var w = new ByteWriter();
+        w.WriteUInt8(0x04);                       // fpInputHeader: fastpath action, numEvents = 1
+        w.WriteUInt8((byte)(2 + ev.Length));      // length (header + length byte + event)
+        w.WriteBytes(ev.AsSpan());
+        return w.ToArray();
+    }
+
     /// <summary>Completes licensing, capability exchange and finalization for an already-joined client.</summary>
     public static async Task ActivateAsync(RdpTestClient client, ushort user, CancellationToken ct)
     {
