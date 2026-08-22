@@ -12,8 +12,8 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 |-----------|-------|-------|
 | M1 | TCP + TPKT + X.224 negotiation + TLS | ✅ done |
 | M2 | MCS connect + channel join | ✅ done |
-| M3 | Licensing + capabilities + finalization → blank desktop | next |
-| M4 | Graphics (bitmap updates) | |
+| M3 | Licensing + capabilities + finalization → blank desktop | ✅ done |
+| M4 | Graphics (bitmap updates) | next |
 | M5 | Keyboard/mouse input | |
 | M6 | Clipboard virtual channel (CLIPRDR) | |
 

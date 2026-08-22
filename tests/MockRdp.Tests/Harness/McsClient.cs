@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using MockRdp.Mcs;
+using MockRdp.Rdp;
 using MockRdp.Util;
 using MockRdp.X224;
 
@@ -21,9 +22,10 @@ public static class McsClient
         net.WriteUInt16LE(0xC003);
         net.WriteUInt16LE((ushort)(8 + channels.Length * 12));
         net.WriteUInt32LE((uint)channels.Length);
+        Span<byte> field = stackalloc byte[8];
         foreach (var name in channels)
         {
-            Span<byte> field = stackalloc byte[8];
+            field.Clear();
             Encoding.ASCII.GetBytes(name).AsSpan(0, Math.Min(name.Length, 7)).CopyTo(field);
             net.WriteBytes(field);
             net.WriteUInt32LE(0); // options
@@ -118,6 +120,85 @@ public static class McsClient
         if (mcs[0] != 0x3E) throw new FormatException("Expected Channel Join Confirm (0x3e).");
         // 3e, result(1), initiator(2), requested(2), channelId(2) → granted id at offset 6.
         return BinaryPrimitives.ReadUInt16BigEndian(mcs.Slice(6, 2));
+    }
+
+    /// <summary>Wraps an RDP payload in an MCS Send Data Request (client → server) on a channel.</summary>
+    public static byte[] SendDataRequest(ushort userId, ushort channelId, ReadOnlySpan<byte> payload)
+    {
+        var w = new ByteWriter();
+        w.WriteUInt8(0x64);
+        w.WriteUInt16BE((ushort)(userId - 1001));
+        w.WriteUInt16BE(channelId);
+        w.WriteUInt8(0x70);
+        Asn1.WritePerLength(w, payload.Length);
+        w.WriteBytes(payload);
+        return Cotp.BuildDataTpdu(w.AsSpan());
+    }
+
+    /// <summary>Minimal Client Info PDU (empty auto-logon fields) on the I/O channel.</summary>
+    public static byte[] BuildClientInfo(ushort userId)
+    {
+        var info = new ByteWriter();
+        info.WriteUInt16LE(0x0040); // Security Header flags = SEC_INFO_PKT
+        info.WriteUInt16LE(0x0000);
+        info.WriteUInt32LE(0);      // CodePage
+        info.WriteUInt32LE(0);      // flags
+        for (int i = 0; i < 5; i++) info.WriteUInt16LE(0); // cbDomain..cbWorkingDir
+        for (int i = 0; i < 5; i++) info.WriteUInt16LE(0); // empty (null) strings
+        return SendDataRequest(userId, Gcc.IoChannelId, info.AsSpan());
+    }
+
+    /// <summary>Minimal Confirm Active PDU (no capability sets — the mock does not parse them).</summary>
+    public static byte[] BuildConfirmActive(ushort userId, uint shareId)
+    {
+        ReadOnlySpan<byte> source = "RDP\0"u8;
+        var body = new ByteWriter();
+        body.WriteUInt32LE(shareId);
+        body.WriteUInt16LE(Gcc.ServerChannelId); // originatorId
+        body.WriteUInt16LE((ushort)source.Length);
+        body.WriteUInt16LE(4);                   // lengthCombinedCapabilities (numCaps + pad)
+        body.WriteBytes(source);
+        body.WriteUInt16LE(0);                   // numberCapabilities
+        body.WriteUInt16LE(0);                   // pad
+        var pdu = ShareControl.Wrap(ShareControl.ConfirmActive, userId, body.AsSpan());
+        return SendDataRequest(userId, Gcc.IoChannelId, pdu);
+    }
+
+    /// <summary>Font List Data PDU — the finalization trigger that makes the server respond.</summary>
+    public static byte[] BuildFontList(ushort userId)
+    {
+        var d = new ByteWriter();
+        d.WriteUInt16LE(0);       // numberFonts
+        d.WriteUInt16LE(0);       // totalNumFonts
+        d.WriteUInt16LE(0x0003);  // listFlags = FIRST | LAST
+        d.WriteUInt16LE(50);      // entrySize
+        var pdu = Finalization.BuildDataPdu(Finalization.Pdu2FontList, d.AsSpan());
+        return SendDataRequest(userId, Gcc.IoChannelId, pdu);
+    }
+
+    /// <summary>Drives a client through negotiation, TLS, MCS connect and channel join; returns the user channel.</summary>
+    public static async Task<ushort> NegotiateThroughChannelJoinAsync(
+        RdpTestClient client, System.Net.IPEndPoint endpoint, string[] channels, CancellationToken ct)
+    {
+        await client.ConnectAsync(endpoint, ct);
+        await client.SendConnectionRequestAsync(RdpNegProtocol.Ssl, ct: ct);
+        await client.ReadConnectionConfirmAsync(ct);
+        await client.UpgradeToTlsAsync(ct: ct);
+
+        await client.WriteRawAsync(BuildConnectInitial(channels), ct);
+        var (io, ids) = ParseConnectResponseNetwork(await client.ReadTpktPayloadAsync(ct));
+
+        await client.WriteRawAsync(ErectDomainRequest(), ct);
+        await client.WriteRawAsync(AttachUserRequest(), ct);
+        ushort user = ParseAttachUserConfirm(await client.ReadTpktPayloadAsync(ct));
+
+        ushort[] toJoin = [user, io, .. ids];
+        foreach (var ch in toJoin)
+        {
+            await client.WriteRawAsync(ChannelJoinRequest(user, ch), ct);
+            await client.ReadTpktPayloadAsync(ct);
+        }
+        return user;
     }
 
     private static int IndexOf(ReadOnlySpan<byte> haystack, ReadOnlySpan<byte> needle)

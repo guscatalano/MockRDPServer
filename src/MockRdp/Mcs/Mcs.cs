@@ -108,6 +108,35 @@ public static class McsPdu
         return (initiator, channelId);
     }
 
+    /// <summary>
+    /// Parses an MCS Send Data Request/Indication, returning the target channel and the
+    /// RDP payload. Header: choice(1) initiator(2) channelId(2) priority(1) length(PER).
+    /// </summary>
+    public static (ushort ChannelId, byte[] Payload) ParseSendData(ReadOnlySpan<byte> mcs)
+    {
+        int pos = 1;                                                     // choice byte (0x64/0x68)
+        pos += 2;                                                        // initiator
+        ushort channelId = BinaryPrimitives.ReadUInt16BigEndian(mcs.Slice(pos, 2));
+        pos += 2;
+        pos += 1;                                                        // dataPriority + segmentation
+        int len = Asn1.ReadPerLength(mcs, ref pos);
+        int available = Math.Min(len, mcs.Length - pos);
+        return (channelId, mcs.Slice(pos, available).ToArray());
+    }
+
+    /// <summary>Wraps an RDP payload in an MCS Send Data Indication (server → client) on a channel.</summary>
+    public static byte[] BuildSendDataIndication(ushort channelId, ReadOnlySpan<byte> payload)
+    {
+        var w = new ByteWriter();
+        w.WriteUInt8(0x68);                                             // sendDataIndication
+        w.WriteUInt16BE((ushort)(Gcc.ServerChannelId - 1001));         // initiator (UserId, offset)
+        w.WriteUInt16BE(channelId);
+        w.WriteUInt8(0x70);                                             // high priority, complete segment
+        Asn1.WritePerLength(w, payload.Length);
+        w.WriteBytes(payload);
+        return Cotp.BuildDataTpdu(w.AsSpan());
+    }
+
     /// <summary>Channel Join Confirm granting the requested channel.</summary>
     public static byte[] BuildChannelJoinConfirm(ushort initiator, ushort channelId)
     {

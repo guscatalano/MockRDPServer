@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 using MockRdp.Framing;
 using MockRdp.Mcs;
+using MockRdp.Rdp;
 using MockRdp.Util;
 using MockRdp.X224;
 
@@ -128,14 +129,66 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     break;
 
                 case McsDomainPdu.SendDataRequest:
-                    log.LogInformation(
-                        "MCS complete: {Joined} channels joined; first Send Data (Client Info) received. [M2 complete — licensing not yet implemented]",
-                        joined);
+                    log.LogInformation("MCS complete: {Joined} channels joined; Client Info received.", joined);
+                    await RunActivationAsync(userChannelId, ct);
                     return;
 
                 default:
                     log.LogWarning("Unexpected MCS PDU 0x{Byte:X2} during channel join.", mcs.Length > 0 ? mcs[0] : 0);
                     return;
+            }
+        }
+    }
+
+    /// <summary>M3: licensing → capability exchange → finalization, ending at an active session.</summary>
+    private async Task RunActivationAsync(ushort userChannelId, CancellationToken ct)
+    {
+        State = ConnectionState.Licensing;
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Licensing.BuildValidClient()), ct);
+        log.LogInformation("Sent licensing: valid client (no license required).");
+
+        State = ConnectionState.CapabilityExchange;
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDemandActive()), ct);
+        log.LogInformation("Sent Demand Active (capabilities).");
+
+        State = ConnectionState.Finalization;
+        while (true)
+        {
+            var packet = await ReadTpktAsync(ct);
+            if (packet is null) { log.LogWarning("Closed during activation."); return; }
+            var mcs = Cotp.StripDataTpdu(packet);
+
+            if (McsPdu.ClassifyDomainPdu(mcs) != McsDomainPdu.SendDataRequest)
+            {
+                log.LogDebug("Ignoring non-Send-Data PDU 0x{Byte:X2} during activation.", mcs.Length > 0 ? mcs[0] : 0);
+                continue;
+            }
+
+            var (_, payload) = McsPdu.ParseSendData(mcs);
+            int pduType = ShareControl.PduType(payload);
+
+            if (pduType == (ShareControl.ConfirmActive & 0x0F))
+            {
+                log.LogInformation("Confirm Active received (client accepted capabilities).");
+            }
+            else if (pduType == (ShareControl.Data & 0x0F))
+            {
+                int type2 = Finalization.DataPduType2(payload);
+                log.LogDebug("Client Data PDU, pduType2={Type2}.", type2);
+                if (type2 == Finalization.Pdu2FontList)
+                {
+                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildSynchronize(userChannelId)), ct);
+                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlCooperate()), ct);
+                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlGranted(userChannelId)), ct);
+                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildFontMap()), ct);
+                    State = ConnectionState.Active;
+                    log.LogInformation("Finalization complete — session ACTIVE (blank desktop). [M3 complete — graphics not yet implemented]");
+                    return;
+                }
+            }
+            else
+            {
+                log.LogDebug("Activation PDU with share-control type {Type}.", pduType);
             }
         }
     }

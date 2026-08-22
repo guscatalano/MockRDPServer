@@ -13,6 +13,9 @@ public static class Gcc
     // RDP channel numbering: I/O channel is fixed at 1003; virtual channels follow.
     public const ushort IoChannelId = 1003;
     public const ushort FirstVirtualChannelId = 1004;
+    // The server's own MCS user identity, used as the initiator of Send Data Indications
+    // and as the PDUSource in share control headers.
+    public const ushort ServerChannelId = 1002;
 
     // Server-data block header types (TS_UD_HEADER type field), little-endian on the wire.
     private const ushort ScCore = 0x0C01;
