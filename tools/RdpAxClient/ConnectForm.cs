@@ -2,7 +2,7 @@ using System.Windows.Forms;
 
 namespace RdpAxClient;
 
-internal sealed record Options(string Host, int Port, string User, string Password, int TimeoutSeconds, int AuthLevel);
+internal sealed record Options(string Host, int Port, string User, string Password, int TimeoutSeconds, int AuthLevel, int HoldSeconds);
 
 /// <summary>
 /// Hosts the mstscax control, connects to the target, and reports the outcome. Connection
@@ -70,6 +70,7 @@ internal sealed class ConnectForm : Form
     }
 
     private bool _certAccepted;
+    private DateTime? _connectedAt;
 
     private void OnPoll(object? sender, EventArgs e)
     {
@@ -85,7 +86,21 @@ internal sealed class ConnectForm : Form
         try
         {
             dynamic ocx = _rdp.Ocx;
-            if ((int)ocx.Connected == 1) { Finish(0, "CONNECTED — session active"); return; }
+            if ((int)ocx.Connected == 1)
+            {
+                if (_opts.HoldSeconds <= 0) { Finish(0, "CONNECTED — session active"); return; }
+                if (_connectedAt is null)
+                {
+                    _connectedAt = DateTime.UtcNow;
+                    Console.WriteLine($"[OK] CONNECTED — showing the live session for {_opts.HoldSeconds}s (move the mouse over the window to draw markers)...");
+                }
+                else if (DateTime.UtcNow - _connectedAt.Value >= TimeSpan.FromSeconds(_opts.HoldSeconds))
+                {
+                    Finish(0, "session displayed; disconnecting");
+                    return;
+                }
+                return;
+            }
         }
         catch { /* control may be mid-transition */ }
 

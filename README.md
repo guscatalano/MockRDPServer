@@ -33,6 +33,17 @@ Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred
   conformance client; `Harness/MockServerFixture.cs` spins up a loopback server per test.
 - `scripts/` — real-client checkpoint automation (see below).
 
+## Quick demo
+
+```pwsh
+pwsh scripts/demo.ps1
+```
+
+Builds everything, runs the 14 per-feature conformance checks, then opens a **live session
+with the mstscax client** (mstsc.exe's own engine) — a window shows the mock's colour test
+pattern; move the mouse over it to draw markers. Auto-closes after a few seconds. Nothing is
+persisted (no cert-store or registry changes).
+
 ## Build & run
 
 ```pwsh

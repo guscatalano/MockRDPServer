@@ -28,7 +28,7 @@ internal static class Program
     private static Options ParseArgs(string[] args)
     {
         string host = "127.0.0.1", user = "test", pass = "test";
-        int port = 3389, timeout = 20, authLevel = 2;
+        int port = 3389, timeout = 20, authLevel = 2, hold = 0;
         for (int i = 0; i < args.Length - 1; i++)
         {
             switch (args[i])
@@ -39,8 +39,9 @@ internal static class Program
                 case "--pass": pass = args[++i]; break;
                 case "--timeout" or "-t": timeout = int.Parse(args[++i]); break;
                 case "--auth-level": authLevel = int.Parse(args[++i]); break;
+                case "--hold": hold = int.Parse(args[++i]); break;
             }
         }
-        return new Options(host, port, user, pass, timeout, authLevel);
+        return new Options(host, port, user, pass, timeout, authLevel, hold);
     }
 }
