@@ -20,7 +20,7 @@ namespace MockRdp.Server;
 public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log,
     string[]? dvcChannels = null, string[]? rdpdrReads = null,
     Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
-    string[]? rdpdrLists = null, string[]? rdpdrWrites = null)
+    string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false)
 {
     private Stream _stream = tcp.GetStream();
     private ushort _cliprdrChannelId;
@@ -245,7 +245,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildFontMap()), ct);
                     State = ConnectionState.Active;
                     log.LogInformation("Finalization complete — session ACTIVE.");
-                    await DrawTestPatternAsync(ct);
+                    if (desktop) await DrawDesktopAsync(ct);
+                    else await DrawTestPatternAsync(ct);
                     await InitClipboardAsync(ct);
                     await InitDvcAsync(ct);
                     await InitRdpdrAsync(ct);
@@ -266,6 +267,19 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         foreach (var square in Graphics.TestPattern())
             await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
         log.LogInformation("Sent startup test pattern ({Count} bitmap updates).", Graphics.TestPattern().Count);
+    }
+
+    /// <summary>Renders the fake Windows desktop and sends it as bitmap-update tiles.</summary>
+    private async Task DrawDesktopAsync(CancellationToken ct)
+    {
+        using var desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight);
+        int tiles = 0;
+        foreach (var (x, y, w, h, pixels) in desktop.Tiles())
+        {
+            await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels)), ct);
+            tiles++;
+        }
+        log.LogInformation("Rendered fake desktop ({Tiles} tiles).", tiles);
     }
 
     /// <summary>M5: keeps the active session alive, reacting to client input.</summary>

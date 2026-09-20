@@ -75,6 +75,12 @@ Drive redirection (`rdpdr` / `\\tsclient`), each takes client paths:
 - `--rdpdr-list <dir[,...]>` — enumerate a redirected directory.
 - `--rdpdr-write <path[,...]>` — write a small marker file to the client.
 
+Fake desktop (experimental — a software-rendered Windows-like session):
+- `--desktop` — render a fake desktop (wallpaper, a window, taskbar + Start + clock) as
+  bitmap updates instead of the colour test pattern.
+- `--screenshot <path.png>` — render one desktop frame to a PNG and exit (no server), for
+  quick visual verification.
+
 ## CI & prebuilt binary
 
 `.github/workflows/ci.yml` builds and tests on every push/PR and publishes a **self-contained

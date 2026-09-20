@@ -48,6 +48,33 @@ public static class Graphics
             Finalization.Pdu2Update, upd.AsSpan());
     }
 
+    /// <summary>Builds a Bitmap Update PDU blitting an arbitrary RGB565 tile at (x, y).
+    /// RDP uncompressed bitmap data is bottom-up, so rows are emitted last-to-first.</summary>
+    public static byte[] BuildBitmapTile(int x, int y, int w, int h, ReadOnlySpan<ushort> pixels)
+    {
+        var bitmap = new ByteWriter(w * h * 2);
+        for (int row = h - 1; row >= 0; row--)
+            for (int col = 0; col < w; col++)
+                bitmap.WriteUInt16LE(pixels[row * w + col]);
+
+        var upd = new ByteWriter();
+        upd.WriteUInt16LE(UpdateTypeBitmap);
+        upd.WriteUInt16LE(1);                             // numberRectangles
+        upd.WriteUInt16LE((ushort)x);                     // destLeft
+        upd.WriteUInt16LE((ushort)y);                     // destTop
+        upd.WriteUInt16LE((ushort)(x + w - 1));           // destRight
+        upd.WriteUInt16LE((ushort)(y + h - 1));           // destBottom
+        upd.WriteUInt16LE((ushort)w);                     // width
+        upd.WriteUInt16LE((ushort)h);                     // height
+        upd.WriteUInt16LE(16);                            // bitsPerPixel
+        upd.WriteUInt16LE(0);                             // flags = uncompressed
+        upd.WriteUInt16LE((ushort)(w * h * 2));           // bitmapLength
+        upd.WriteBytes(bitmap.AsSpan());
+
+        return ShareControl.BuildDataPdu(Capabilities.ShareId, Gcc.ServerChannelId,
+            Finalization.Pdu2Update, upd.AsSpan());
+    }
+
     /// <summary>A deterministic row of eight colour squares, used as the startup test pattern.</summary>
     public static IReadOnlyList<Square> TestPattern()
     {

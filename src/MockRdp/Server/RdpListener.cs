@@ -18,11 +18,12 @@ public sealed class RdpListener : IDisposable
     private readonly Dictionary<string, Dvc.Behavior>? _dvcBehaviors;
     private readonly string[]? _rdpdrLists;
     private readonly string[]? _rdpdrWrites;
+    private readonly bool _desktop;
 
     public RdpListener(IPAddress address, int port, X509Certificate2 cert, ILoggerFactory loggerFactory,
         string[]? dvcChannels = null, string[]? rdpdrReads = null,
         Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
-        string[]? rdpdrLists = null, string[]? rdpdrWrites = null)
+        string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false)
     {
         _listener = new TcpListener(address, port);
         _cert = cert;
@@ -33,6 +34,7 @@ public sealed class RdpListener : IDisposable
         _dvcBehaviors = dvcBehaviors;
         _rdpdrLists = rdpdrLists;
         _rdpdrWrites = rdpdrWrites;
+        _desktop = desktop;
     }
 
     /// <summary>The bound port. Valid after <see cref="Start"/> (useful when binding to port 0 in tests).</summary>
@@ -71,7 +73,7 @@ public sealed class RdpListener : IDisposable
             using (client)
             {
                 var conn = new RdpConnection(client, _cert, log, _dvcChannels, _rdpdrReads, _dvcBehaviors,
-                    _rdpdrLists, _rdpdrWrites);
+                    _rdpdrLists, _rdpdrWrites, _desktop);
                 await conn.RunAsync(ct);
             }
         }
