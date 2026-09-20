@@ -148,6 +148,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
                 case McsDomainPdu.SendDataRequest:
                     log.LogInformation("MCS complete: {Joined} channels joined; Client Info received.", joined);
+                    var (_, clientInfo) = McsPdu.ParseSendData(mcs);
+                    var info = ClientInfo.Parse(clientInfo);
+                    log.LogInformation("Client Info: user='{User}' domain='{Domain}' altShell='{Shell}' workDir='{Dir}'.",
+                        info.User, info.Domain, info.AlternateShell, info.WorkingDir);
                     await RunActivationAsync(userChannelId, ct);
                     return;
 
