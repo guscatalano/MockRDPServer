@@ -282,8 +282,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task SendDesktopAsync(CancellationToken ct)
     {
         if (_desktop is null) return;
+        // Write all changed tiles, then flush once (per-tile flushing is the drag bottleneck).
+        int tiles = 0;
         foreach (var (x, y, w, h, pixels) in _desktop.DirtyTiles())
-            await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels)), ct);
+        {
+            await _stream.WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels)), ct);
+            tiles++;
+        }
+        if (tiles > 0) await _stream.FlushAsync(ct);
     }
 
     /// <summary>M5: keeps the active session alive, reacting to client input. While idle it
@@ -331,6 +337,18 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         if (McsPdu.ClassifyDomainPdu(mcs) != McsDomainPdu.SendDataRequest) return;
 
         var (channelId, data) = McsPdu.ParseSendData(mcs);
+
+        // Slow-path input (TS_INPUT_PDU) on the I/O channel — mstsc/mstscax send input this way
+        // rather than fast-path even when fast-path is advertised.
+        if (channelId == Gcc.IoChannelId)
+        {
+            if (_desktop is not null
+                && ShareControl.PduType(data) == (ShareControl.Data & 0x0F)
+                && Finalization.DataPduType2(data) == Finalization.Pdu2Input)
+                await ApplyInputAsync(Input.ParseSlowPath(data), ct);
+            return;
+        }
+
         if (channelId == _cliprdrChannelId && _cliprdrChannelId != 0)
             await HandleClipboardAsync(VirtualChannel.Unwrap(data).ToArray(), ct);
         else if (channelId == _drdynvcChannelId && _drdynvcChannelId != 0)
@@ -675,37 +693,33 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private Task SendRdpdrAsync(byte[] pdu, CancellationToken ct) =>
         WriteAsync(McsPdu.BuildSendDataIndication(_rdpdrChannelId, VirtualChannel.Wrap(pdu)), ct);
 
-    /// <summary>Decodes fast-path input and draws a marker where the mouse moves/clicks.</summary>
+    /// <summary>Decodes fast-path input; feeds the desktop, or draws markers in non-desktop mode.</summary>
     private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)
     {
-        bool changed = false;
-        foreach (var ev in Input.ParseFastPath(fastPathHeader, payload))
-        {
-            if (_desktop is not null)
-            {
-                changed |= _desktop.OnInput(ev);
-                continue;
-            }
-            switch (ev.Type)
-            {
-                case InputEventType.Mouse:
-                    await DrawMarkerAsync(ev.X, ev.Y, ct);
-                    break;
-                case InputEventType.Scancode:
-                    log.LogDebug("Key: scancode 0x{Code:X2} flags 0x{Flags:X2}.", ev.Code, ev.Flags);
-                    break;
-                case InputEventType.Unicode:
-                    log.LogDebug("Key: unicode U+{Code:X4}.", ev.X);
-                    break;
-            }
-        }
+        var events = Input.ParseFastPath(fastPathHeader, payload);
+        if (_desktop is not null) { await ApplyInputAsync(events, ct); return; }
 
-        if (changed && _desktop is not null)
-        {
-            await SendDesktopAsync(ct);
-            log.LogInformation("Desktop: active={Active} startMenu={Menu} windows={Windows}.",
-                _desktop.Active, _desktop.StartMenuOpen, _desktop.WindowCount);
-        }
+        foreach (var ev in events)
+            if (ev.Type == InputEventType.Mouse) await DrawMarkerAsync(ev.X, ev.Y, ct);
+    }
+
+    private readonly System.Diagnostics.Stopwatch _desktopClock = System.Diagnostics.Stopwatch.StartNew();
+
+    /// <summary>Applies input events to the fake desktop and resends what changed. While a
+    /// window is being dragged, frames are coalesced to ~30fps (dirty-rect accumulates the
+    /// changed tiles across the skipped sends, and the final position sends on mouse-up).</summary>
+    private async Task ApplyInputAsync(IReadOnlyList<InputEvent> events, CancellationToken ct)
+    {
+        if (_desktop is null || events.Count == 0) return;
+        bool changed = false;
+        foreach (var ev in events)
+            changed |= _desktop.OnInput(ev);
+        if (!changed) return;
+
+        if (_desktop.IsDragging && _desktopClock.ElapsedMilliseconds < 33) return; // coalesce drag frames
+        _desktopClock.Restart();
+        _desktop.Render();          // render only when we actually send (not per move event)
+        await SendDesktopAsync(ct);
     }
 
     /// <summary>Draws a small marker square at the cursor position (clamped to the desktop).</summary>

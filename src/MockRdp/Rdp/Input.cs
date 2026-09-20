@@ -18,6 +18,54 @@ public static class Input
     public const ushort PtrFlagsDown = 0x8000;
     public const ushort PtrFlagsButton1 = 0x1000;
 
+    // Slow-path keyboard flags (TS_KEYBOARD_EVENT), distinct from fast-path's bit flags.
+    private const ushort KbdFlagsRelease = 0x8000;
+    private const ushort KbdFlagsExtended = 0x0100;
+
+    /// <summary>
+    /// Slow-path client input (TS_INPUT_PDU_DATA, MS-RDPBCGR 2.2.8.1.1.3), which mstsc/mstscax
+    /// send over the I/O channel. Normalises each event to the same <see cref="InputEvent"/>
+    /// convention as <see cref="ParseFastPath"/> (scancode release = flags bit 0). The argument
+    /// is the Share Data PDU; input data begins after the 18-byte header.
+    /// </summary>
+    public static List<InputEvent> ParseSlowPath(ReadOnlySpan<byte> shareDataPdu)
+    {
+        var events = new List<InputEvent>();
+        if (shareDataPdu.Length < 22) return events;
+
+        int pos = 18;
+        int num = BinaryPrimitives.ReadUInt16LittleEndian(shareDataPdu.Slice(pos, 2));
+        pos += 4; // numberEvents (2) + pad (2)
+
+        for (int i = 0; i < num && pos + 12 <= shareDataPdu.Length; i++)
+        {
+            pos += 4; // eventTime
+            ushort messageType = BinaryPrimitives.ReadUInt16LittleEndian(shareDataPdu.Slice(pos, 2));
+            ushort f = BinaryPrimitives.ReadUInt16LittleEndian(shareDataPdu.Slice(pos + 2, 2));
+            ushort a = BinaryPrimitives.ReadUInt16LittleEndian(shareDataPdu.Slice(pos + 4, 2));
+            ushort b = BinaryPrimitives.ReadUInt16LittleEndian(shareDataPdu.Slice(pos + 6, 2));
+            pos += 8; // messageType (2) + slowPathInputData (6)
+
+            switch (messageType)
+            {
+                case 0x0004: // INPUT_EVENT_SCANCODE: keyboardFlags(f), keyCode(a)
+                    ushort flags = (ushort)(((f & KbdFlagsRelease) != 0 ? 0x01 : 0x00) | ((f & KbdFlagsExtended) != 0 ? 0x02 : 0x00));
+                    events.Add(new InputEvent(InputEventType.Scancode, flags, 0, 0, (byte)a));
+                    break;
+                case 0x8001: // INPUT_EVENT_MOUSE: pointerFlags(f), x(a), y(b)
+                    events.Add(new InputEvent(InputEventType.Mouse, f, a, b, 0));
+                    break;
+                case 0x8002: // INPUT_EVENT_MOUSEX
+                    events.Add(new InputEvent(InputEventType.MouseX, f, a, b, 0));
+                    break;
+                case 0x0005: // INPUT_EVENT_UNICODE: unicodeCode(a)
+                    events.Add(new InputEvent(InputEventType.Unicode, f, a, 0, 0));
+                    break;
+            }
+        }
+        return events;
+    }
+
     public static List<InputEvent> ParseFastPath(byte fastPathHeader, ReadOnlySpan<byte> payload)
     {
         var events = new List<InputEvent>();

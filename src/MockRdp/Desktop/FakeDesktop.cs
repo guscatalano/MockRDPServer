@@ -27,6 +27,7 @@ public sealed class FakeDesktop : IDisposable
     public int WindowCount => _windows.Count;
     public string FocusedTitle => Focused?.Title ?? "";
     public string FocusedText => Focused?.Body ?? "";
+    public bool IsDragging => _drag is not null;
 
     private enum WinKind { Generic, Explorer, Notepad, Run }
 
@@ -50,6 +51,7 @@ public sealed class FakeDesktop : IDisposable
     private readonly VfsNode _vfsHome;
 
     private readonly Image<Rgba32> _fb;
+    private readonly Image<Rgba32> _wallpaper;   // pre-rendered gradient (recomputing it per frame is slow)
     private readonly Font? _font;
     private readonly Font? _small;
     private ulong[]? _tileHash;
@@ -67,6 +69,10 @@ public sealed class FakeDesktop : IDisposable
         Width = width;
         Height = height;
         _fb = new Image<Rgba32>(width, height);
+        _wallpaper = new Image<Rgba32>(width, height);
+        _wallpaper.Mutate(ctx => ctx.Fill(new LinearGradientBrush(
+            new PointF(0, 0), new PointF(0, height), GradientRepetitionMode.None,
+            new ColorStop(0f, Color.ParseHex("103A6B")), new ColorStop(1f, Color.ParseHex("2B6AB0")))));
         _font = TryLoadFont(15);
         _small = TryLoadFont(12);
         _vfsRoot = Vfs.BuildDefault();
@@ -114,11 +120,12 @@ public sealed class FakeDesktop : IDisposable
         }
         if (release) return false;
 
-        if (scancode == 0x4F && _ctrl && _alt) return Switch(DesktopKind.Secure);
+        // mstsc maps Ctrl+Alt+End → Ctrl+Alt+Del on the wire (Del = 0x53); accept End (0x4F) too.
+        if ((scancode == 0x53 || scancode == 0x4F) && _ctrl && _alt) return Switch(DesktopKind.Secure);
         if (scancode == 0x01) // Esc
         {
             if (Active == DesktopKind.Secure) return Switch(DesktopKind.Default);
-            if (StartMenuOpen) { StartMenuOpen = false; Render(); return true; }
+            if (StartMenuOpen) { StartMenuOpen = false; return true; }
             return false;
         }
         if (Active == DesktopKind.Secure) return false;
@@ -131,20 +138,17 @@ public sealed class FakeDesktop : IDisposable
         {
             if (f.Body.Length == 0) return false;
             f.Body = f.Body[..^1];
-            Render();
             return true;
         }
         if (scancode == Keys.Enter)
         {
             if (f.Kind == WinKind.Run) { RunCommand(f); return true; }
             f.Body += "\r\n";
-            Render();
             return true;
         }
         if (Keys.ScancodeToChar(scancode, _shift) is { } ch)
         {
             f.Body += ch;
-            Render();
             return true;
         }
         return false;
@@ -165,7 +169,6 @@ public sealed class FakeDesktop : IDisposable
                 Open(new Win { Title = "Run", Body = raw.Length == 0 ? "Type a program name, then Enter." : $"Windows cannot find '{raw}'.", W = 420, H = 140 });
                 break;
         }
-        Render();
     }
 
     private bool OnMouseDown(int x, int y)
@@ -174,7 +177,7 @@ public sealed class FakeDesktop : IDisposable
             return InRect(x, y, CancelBtn()) && Switch(DesktopKind.Default);
 
         int tbY = Height - Taskbar;
-        if (InRect(x, y, 0, tbY, StartW, Taskbar)) { StartMenuOpen = !StartMenuOpen; Render(); return true; }
+        if (InRect(x, y, 0, tbY, StartW, Taskbar)) { StartMenuOpen = !StartMenuOpen; return true; }
 
         if (StartMenuOpen)
         {
@@ -184,11 +187,9 @@ public sealed class FakeDesktop : IDisposable
                 {
                     Launch(MenuItems[i]);
                     StartMenuOpen = false;
-                    Render();
                     return true;
                 }
             StartMenuOpen = false;
-            Render();
             return true;
         }
 
@@ -196,19 +197,18 @@ public sealed class FakeDesktop : IDisposable
         for (int i = _windows.Count - 1; i >= 0; i--)
         {
             var w = _windows[i];
-            if (InRect(x, y, w.X + w.W - CloseW, w.Y, CloseW, TitleH)) { _windows.RemoveAt(i); Render(); return true; }
+            if (InRect(x, y, w.X + w.W - CloseW, w.Y, CloseW, TitleH)) { _windows.RemoveAt(i); return true; }
             if (InRect(x, y, w.X, w.Y, w.W, TitleH)) // title bar → raise + drag
             {
                 Raise(i);
                 _drag = w; _dragDx = x - w.X; _dragDy = y - w.Y;
-                return false; // no visual change yet
+                return true; // raised
             }
             if (InRect(x, y, w.X, w.Y, w.W, w.H))
             {
                 bool raised = Raise(i);
                 bool acted = w.Kind == WinKind.Explorer && ExplorerClick(w, x, y);
-                if (raised || acted) { Render(); return true; }
-                return false;
+                return raised || acted;
             }
         }
         return false;
@@ -240,7 +240,6 @@ public sealed class FakeDesktop : IDisposable
         if (_drag is null) return false;
         _drag.X = Math.Clamp(x - _dragDx, -_drag.W + 80, Width - 80);
         _drag.Y = Math.Clamp(y - _dragDy, 0, Height - Taskbar - TitleH);
-        Render();
         return true;
     }
 
@@ -288,7 +287,6 @@ public sealed class FakeDesktop : IDisposable
         Active = kind;
         StartMenuOpen = false;
         _drag = null;
-        Render();
         return true;
     }
 
@@ -303,8 +301,7 @@ public sealed class FakeDesktop : IDisposable
     private void RenderDefault(IImageProcessingContext ctx)
     {
         int tbY = Height - Taskbar;
-        ctx.Fill(new LinearGradientBrush(new PointF(0, 0), new PointF(0, Height), GradientRepetitionMode.None,
-            new ColorStop(0f, Color.ParseHex("103A6B")), new ColorStop(1f, Color.ParseHex("2B6AB0"))));
+        ctx.DrawImage(_wallpaper, 1f); // cached gradient
 
         foreach (var w in _windows) DrawWindow(ctx, w);
 
@@ -464,5 +461,5 @@ public sealed class FakeDesktop : IDisposable
             }
     }
 
-    public void Dispose() => _fb.Dispose();
+    public void Dispose() { _fb.Dispose(); _wallpaper.Dispose(); }
 }
