@@ -16,12 +16,19 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 | M4 | Graphics (bitmap updates) | ✅ done |
 | M5 | Keyboard/mouse input | ✅ done |
 | M6 | Clipboard virtual channel (CLIPRDR) | ✅ done |
+| M7 | Dynamic virtual channels (DRDYNVC / MS-RDPEDYC) | ✅ done |
 
 All originally planned milestones are complete: a real RDP client connects end-to-end,
 sees rendered graphics, drives the screen with keyboard/mouse, and exchanges clipboard
 text over the `cliprdr` channel. Verified against **FreeRDP** and against **mstscax** —
 the ActiveX control that is `mstsc.exe`'s own engine — so the mock is mstsc-grade. See
 `tools/RdpAxClient/` for the mstscax-based test client.
+
+The mock also speaks the **dynamic virtual channel** layer (`drdynvc`): it advertises
+capabilities, opens one or more named DVCs (server-initiated create), and **echoes** any
+data sent back on the same channel. This makes it a target for tooling that rides DVCs —
+e.g. [RDPeek](https://github.com/guscatalano/RDPeek), whose plugin/agent open
+`dvc::diag::inspector`. Choose the channels with `--dvc` (default `ECHO`).
 
 Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred.
 
@@ -39,7 +46,7 @@ Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred
 pwsh scripts/demo.ps1
 ```
 
-Builds everything, runs the 14 per-feature conformance checks, then opens a **live session
+Builds everything, runs the per-feature conformance checks, then opens a **live session
 with the mstscax client** (mstsc.exe's own engine) — a window shows the mock's colour test
 pattern; move the mouse over it to draw markers. Auto-closes after a few seconds. Nothing is
 persisted (no cert-store or registry changes).
@@ -49,9 +56,25 @@ persisted (no cert-store or registry changes).
 ```pwsh
 dotnet test                                   # unit + in-process end-to-end (Tier 1)
 dotnet run --project src/MockRdp -- --port 3389 --log-level trace
+dotnet run --project src/MockRdp -- --dvc "dvc::diag::inspector"   # open a specific DVC
 ```
 
-Server flags: `--port <n>` (default 3389), `--bind <ip>`, `--log-level trace|debug|info|warn|error`.
+Server flags: `--port <n>` (default 3389), `--bind <ip>`, `--log-level trace|debug|info|warn|error`,
+`--dvc <name[,name...]>` (dynamic virtual channels to open; default `ECHO`).
+
+## CI & prebuilt binary
+
+`.github/workflows/ci.yml` builds and tests on every push/PR and publishes a **self-contained
+single-file `MockRdp.exe`** (win-x64) as the `mockrdp-win-x64` workflow artifact — runnable
+with no .NET runtime installed. Tagging `v*` (or running the Release workflow) attaches the
+same exe to a GitHub Release, so consumers can fetch a stable URL:
+
+```
+https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdp.exe
+```
+
+This is what a downstream project (e.g. RDPeek) downloads to spin up a real DVC-capable RDP
+target in its own integration tests.
 
 ## Real-client checkpoints (automation)
 

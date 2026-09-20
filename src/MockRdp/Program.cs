@@ -3,11 +3,13 @@ using Microsoft.Extensions.Logging;
 using MockRdp.Server;
 using MockRdp.Transport;
 
-// Minimal arg parsing: --port <n>, --log-level <trace|debug|info|warn|error>, --bind <ip>.
+// Minimal arg parsing: --port <n>, --log-level <trace|debug|info|warn|error>, --bind <ip>,
+// --dvc <name[,name...]> (dynamic virtual channels the server opens; default "ECHO").
 int port = 3389;
 var logLevel = LogLevel.Information;
 var bind = IPAddress.Any;
 string? certOut = null;
+string[]? dvcChannels = null;
 
 for (int i = 0; i < args.Length - 1; i++)
 {
@@ -16,6 +18,7 @@ for (int i = 0; i < args.Length - 1; i++)
         case "--port": port = int.Parse(args[++i]); break;
         case "--bind": bind = IPAddress.Parse(args[++i]); break;
         case "--cert-out": certOut = args[++i]; break;
+        case "--dvc": dvcChannels = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
         case "--log-level":
             logLevel = args[++i].ToLowerInvariant() switch
             {
@@ -44,7 +47,7 @@ if (certOut is not null)
     File.WriteAllBytes(certOut, cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert));
     loggerFactory.CreateLogger("Program").LogInformation("Exported server certificate to {Path}", certOut);
 }
-using var listener = new RdpListener(bind, port, cert, loggerFactory);
+using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels);
 listener.Start();
 
 using var cts = new CancellationTokenSource();

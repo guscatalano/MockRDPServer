@@ -12,13 +12,16 @@ public sealed class RdpListener : IDisposable
     private readonly X509Certificate2 _cert;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger _log;
+    private readonly string[]? _dvcChannels;
 
-    public RdpListener(IPAddress address, int port, X509Certificate2 cert, ILoggerFactory loggerFactory)
+    public RdpListener(IPAddress address, int port, X509Certificate2 cert, ILoggerFactory loggerFactory,
+        string[]? dvcChannels = null)
     {
         _listener = new TcpListener(address, port);
         _cert = cert;
         _loggerFactory = loggerFactory;
         _log = loggerFactory.CreateLogger("RdpListener");
+        _dvcChannels = dvcChannels;
     }
 
     /// <summary>The bound port. Valid after <see cref="Start"/> (useful when binding to port 0 in tests).</summary>
@@ -56,7 +59,7 @@ public sealed class RdpListener : IDisposable
         {
             using (client)
             {
-                var conn = new RdpConnection(client, _cert, log);
+                var conn = new RdpConnection(client, _cert, log, _dvcChannels);
                 await conn.RunAsync(ct);
             }
         }

@@ -11,10 +11,10 @@ public sealed class MockServerFixture : IDisposable
     private readonly RdpListener _listener;
     private readonly CancellationTokenSource _cts = new();
 
-    public MockServerFixture()
+    public MockServerFixture(string[]? dvcChannels = null)
     {
         var cert = CertProvider.CreateSelfSigned();
-        _listener = new RdpListener(IPAddress.Loopback, 0, cert, NullLoggerFactory.Instance);
+        _listener = new RdpListener(IPAddress.Loopback, 0, cert, NullLoggerFactory.Instance, dvcChannels);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
     }

@@ -16,11 +16,20 @@ namespace MockRdp.Server;
 /// implements M1: X.224 negotiation and the TLS upgrade. Later milestones extend
 /// <see cref="RunAsync"/> past <see cref="ConnectionState.TlsUp"/>.
 /// </summary>
-public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log)
+public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log, string[]? dvcChannels = null)
 {
     private Stream _stream = tcp.GetStream();
     private ushort _cliprdrChannelId;
     private bool _offeredServerClipboard;
+
+    // Dynamic virtual channels (MS-RDPEDYC over "drdynvc"). The server advertises
+    // capabilities, then opens each configured channel and echoes data back on it.
+    private ushort _drdynvcChannelId;
+    private readonly string[] _dvcChannelNames = dvcChannels ?? ["ECHO"];
+    private readonly Dictionary<uint, string> _dvcOpen = new();       // id -> name (create confirmed)
+    private readonly Dictionary<uint, string> _dvcPending = new();    // id -> name (create sent)
+    private readonly Dictionary<uint, (int Total, ByteWriter Buf)> _dvcReasm = new();
+    private uint _nextDvcId = 1;
 
     public ConnectionState State { get; private set; } = ConnectionState.Initial;
 
@@ -98,6 +107,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         int channelCount = channels.Count;
         int clipIndex = channels.FindIndex(n => string.Equals(n, "cliprdr", StringComparison.OrdinalIgnoreCase));
         _cliprdrChannelId = clipIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + clipIndex) : (ushort)0;
+        int dvcIndex = channels.FindIndex(n => string.Equals(n, "drdynvc", StringComparison.OrdinalIgnoreCase));
+        _drdynvcChannelId = dvcIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + dvcIndex) : (ushort)0;
         ushort userChannelId = (ushort)(Gcc.FirstVirtualChannelId + channelCount);
         log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested ({Names}).",
             channelCount, string.Join(", ", channels));
@@ -192,6 +203,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     log.LogInformation("Finalization complete — session ACTIVE.");
                     await DrawTestPatternAsync(ct);
                     await InitClipboardAsync(ct);
+                    await InitDvcAsync(ct);
                     await ServeAsync(ct);
                     return;
                 }
@@ -244,6 +256,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         var (channelId, data) = McsPdu.ParseSendData(mcs);
         if (channelId == _cliprdrChannelId && _cliprdrChannelId != 0)
             await HandleClipboardAsync(VirtualChannel.Unwrap(data).ToArray(), ct);
+        else if (channelId == _drdynvcChannelId && _drdynvcChannelId != 0)
+            await HandleDvcAsync(VirtualChannel.Unwrap(data).ToArray(), ct);
     }
 
     /// <summary>Handles one CLIPRDR PDU: acks format lists, offers text, and serves it on request.</summary>
@@ -274,6 +288,100 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
     private Task SendClipboardAsync(byte[] cliprdrPdu, CancellationToken ct) =>
         WriteAsync(McsPdu.BuildSendDataIndication(_cliprdrChannelId, VirtualChannel.Wrap(cliprdrPdu)), ct);
+
+    /// <summary>Opens the DVC layer: advertise capabilities. Channels are created once the
+    /// client answers with its capabilities response.</summary>
+    private async Task InitDvcAsync(CancellationToken ct)
+    {
+        if (_drdynvcChannelId == 0) return;
+        await SendDvcAsync(Dvc.BuildCapabilitiesV1(), ct);
+        log.LogInformation("DVC (drdynvc) ready on {Channel}: sent capabilities v1.", _drdynvcChannelId);
+    }
+
+    /// <summary>Handles one inbound DRDYNVC PDU: capabilities response, create response,
+    /// channel data (echoed back), or close.</summary>
+    private async Task HandleDvcAsync(byte[] pdu, CancellationToken ct)
+    {
+        var msg = Dvc.Parse(pdu);
+        switch (msg.Cmd)
+        {
+            case Dvc.Cmd.Capabilities:
+                log.LogInformation("DVC: client capabilities (version {Version}); opening {Count} channel(s).",
+                    msg.Version, _dvcChannelNames.Length);
+                foreach (var name in _dvcChannelNames)
+                    await OpenDvcChannelAsync(name, ct);
+                break;
+
+            case Dvc.Cmd.Create: // inbound Create is a create RESPONSE
+                var name0 = _dvcPending.Remove(msg.ChannelId, out var pending) ? pending : $"#{msg.ChannelId}";
+                int status = Dvc.CreationStatus(msg);
+                if (status == 0)
+                {
+                    _dvcOpen[msg.ChannelId] = name0;
+                    log.LogInformation("DVC: channel '{Name}' (id {Id}) opened by client.", name0, msg.ChannelId);
+                }
+                else
+                {
+                    log.LogWarning("DVC: client rejected channel '{Name}' (id {Id}), status 0x{Status:X8}.",
+                        name0, msg.ChannelId, (uint)status);
+                }
+                break;
+
+            case Dvc.Cmd.DataFirst:
+            case Dvc.Cmd.Data:
+                await HandleDvcDataAsync(msg, ct);
+                break;
+
+            case Dvc.Cmd.Close:
+                if (_dvcOpen.Remove(msg.ChannelId, out var closed))
+                    log.LogInformation("DVC: client closed channel '{Name}' (id {Id}).", closed, msg.ChannelId);
+                _dvcReasm.Remove(msg.ChannelId);
+                break;
+        }
+    }
+
+    private async Task OpenDvcChannelAsync(string name, CancellationToken ct)
+    {
+        uint id = _nextDvcId++;
+        _dvcPending[id] = name;
+        await SendDvcAsync(Dvc.BuildCreateRequest(id, name), ct);
+        log.LogInformation("DVC: create request for '{Name}' (id {Id}).", name, id);
+    }
+
+    /// <summary>Reassembles fragmented data and echoes each complete message back on its channel.</summary>
+    private async Task HandleDvcDataAsync(Dvc.Message msg, CancellationToken ct)
+    {
+        if (!_dvcOpen.ContainsKey(msg.ChannelId))
+        {
+            log.LogDebug("DVC: data on unopened channel {Id}, ignoring.", msg.ChannelId);
+            return;
+        }
+
+        byte[]? complete;
+        if (msg.Cmd == Dvc.Cmd.Data && !_dvcReasm.ContainsKey(msg.ChannelId))
+        {
+            complete = msg.Data; // unfragmented
+        }
+        else
+        {
+            if (msg.Cmd == Dvc.Cmd.DataFirst)
+                _dvcReasm[msg.ChannelId] = (msg.TotalLength, new ByteWriter());
+
+            if (!_dvcReasm.TryGetValue(msg.ChannelId, out var acc)) return;
+            acc.Buf.WriteBytes(msg.Data);
+            if (acc.Buf.Length < acc.Total) return;
+            complete = acc.Buf.ToArray();
+            _dvcReasm.Remove(msg.ChannelId);
+        }
+
+        log.LogInformation("DVC: '{Name}' (id {Id}) received {Count} bytes — echoing back.",
+            _dvcOpen[msg.ChannelId], msg.ChannelId, complete.Length);
+        foreach (var outPdu in Dvc.BuildData(msg.ChannelId, complete))
+            await SendDvcAsync(outPdu, ct);
+    }
+
+    private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>
+        WriteAsync(McsPdu.BuildSendDataIndication(_drdynvcChannelId, VirtualChannel.Wrap(dvcPdu)), ct);
 
     /// <summary>Decodes fast-path input and draws a marker where the mouse moves/clicks.</summary>
     private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)

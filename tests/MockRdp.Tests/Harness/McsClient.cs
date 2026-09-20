@@ -219,6 +219,21 @@ public static class McsClient
         }
     }
 
+    /// <summary>Sends a DRDYNVC PDU on the drdynvc channel (wrapped in a Channel PDU Header).</summary>
+    public static Task SendDvcAsync(RdpTestClient client, ushort user, ushort drdynvcChannel, byte[] dvcPdu, CancellationToken ct) =>
+        client.WriteRawAsync(SendDataRequest(user, drdynvcChannel, VirtualChannel.Wrap(dvcPdu)), ct);
+
+    /// <summary>Reads TPKT frames until one arrives on the drdynvc channel; returns its DRDYNVC PDU.</summary>
+    public static async Task<byte[]> ReadDvcAsync(RdpTestClient client, ushort drdynvcChannel, CancellationToken ct)
+    {
+        while (true)
+        {
+            var (channelId, data) = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
+            if (channelId == drdynvcChannel)
+                return VirtualChannel.Unwrap(data).ToArray();
+        }
+    }
+
     /// <summary>Reads TPKT frames until one arrives on the I/O channel; returns its share control PDU.</summary>
     public static async Task<byte[]> ReadIoBitmapAsync(RdpTestClient client, CancellationToken ct)
     {

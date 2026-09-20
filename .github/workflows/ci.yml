@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    name: Build & test (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore MockRdp.slnx
+
+      - name: Build
+        run: dotnet build MockRdp.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test MockRdp.slnx -c Release --no-build --verbosity normal
+
+  publish:
+    name: Publish mock server (win-x64)
+    runs-on: windows-latest
+    needs: build-test
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # Self-contained single-file exe so RDPeek's integration tests can download and run
+      # it as a real DVC-capable RDP target with no .NET runtime on the box.
+      - name: Publish MockRdp
+        run: >
+          dotnet publish src/MockRdp -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -o publish
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mockrdp-win-x64
+          path: publish/MockRdp.exe
+          if-no-files-found: error
