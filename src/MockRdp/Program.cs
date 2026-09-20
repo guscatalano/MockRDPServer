@@ -11,6 +11,7 @@ var logLevel = LogLevel.Information;
 var bind = IPAddress.Any;
 string? certOut = null;
 string[]? dvcChannels = null;
+string[]? rdpdrReads = null;
 string? logFile = null;
 
 for (int i = 0; i < args.Length - 1; i++)
@@ -22,6 +23,7 @@ for (int i = 0; i < args.Length - 1; i++)
         case "--cert-out": certOut = args[++i]; break;
         case "--log-file": logFile = args[++i]; break;
         case "--dvc": dvcChannels = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
+        case "--rdpdr-read": rdpdrReads = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
         case "--log-level":
             logLevel = args[++i].ToLowerInvariant() switch
             {
@@ -54,7 +56,7 @@ if (certOut is not null)
     File.WriteAllBytes(certOut, cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert));
     loggerFactory.CreateLogger("Program").LogInformation("Exported server certificate to {Path}", certOut);
 }
-using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels);
+using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads);
 listener.Start();
 
 using var cts = new CancellationTokenSource();

@@ -1,6 +1,7 @@
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
 using MockRdp.Framing;
@@ -16,7 +17,8 @@ namespace MockRdp.Server;
 /// implements M1: X.224 negotiation and the TLS upgrade. Later milestones extend
 /// <see cref="RunAsync"/> past <see cref="ConnectionState.TlsUp"/>.
 /// </summary>
-public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log, string[]? dvcChannels = null)
+public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log,
+    string[]? dvcChannels = null, string[]? rdpdrReads = null)
 {
     private Stream _stream = tcp.GetStream();
     private ushort _cliprdrChannelId;
@@ -30,6 +32,25 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private readonly Dictionary<uint, string> _dvcPending = new();    // id -> name (create sent)
     private readonly Dictionary<uint, (int Total, ByteWriter Buf)> _dvcReasm = new();
     private uint _nextDvcId = 1;
+
+    // Drive redirection (MS-RDPEFS over "rdpdr"). After the init handshake the mock reads
+    // the configured client paths back over the redirected drives (\\tsclient) — proving the
+    // redirected content is reachable, not just requested. Reads are chunked small enough to
+    // fit one static-channel PDU (no reassembly), and capped so a huge file doesn't stream.
+    private const uint RdpdrReadChunk = 1000;
+    private const long RdpdrReadCap = 64 * 1024;
+    private ushort _rdpdrChannelId;
+    private readonly Queue<string> _rdpdrReads = new(rdpdrReads ?? []);
+    private readonly Dictionary<char, uint> _rdpdrDrives = new();     // drive letter -> device id
+    private uint _rdpdrCompletionId;
+    private enum RdpdrIo { Idle, Create, Read, Close }
+    private RdpdrIo _rdpdrIo = RdpdrIo.Idle;
+    private string _rdpdrPath = "";
+    private uint _rdpdrDeviceId;
+    private uint _rdpdrFileId;
+    private ulong _rdpdrOffset;
+    private long _rdpdrBytes;
+    private IncrementalHash? _rdpdrHash;
 
     public ConnectionState State { get; private set; } = ConnectionState.Initial;
 
@@ -109,6 +130,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         _cliprdrChannelId = clipIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + clipIndex) : (ushort)0;
         int dvcIndex = channels.FindIndex(n => string.Equals(n, "drdynvc", StringComparison.OrdinalIgnoreCase));
         _drdynvcChannelId = dvcIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + dvcIndex) : (ushort)0;
+        int rdpdrIndex = channels.FindIndex(n => string.Equals(n, "rdpdr", StringComparison.OrdinalIgnoreCase));
+        _rdpdrChannelId = rdpdrIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + rdpdrIndex) : (ushort)0;
         ushort userChannelId = (ushort)(Gcc.FirstVirtualChannelId + channelCount);
         log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested ({Names}).",
             channelCount, string.Join(", ", channels));
@@ -208,6 +231,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     await DrawTestPatternAsync(ct);
                     await InitClipboardAsync(ct);
                     await InitDvcAsync(ct);
+                    await InitRdpdrAsync(ct);
                     await ServeAsync(ct);
                     return;
                 }
@@ -262,6 +286,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             await HandleClipboardAsync(VirtualChannel.Unwrap(data).ToArray(), ct);
         else if (channelId == _drdynvcChannelId && _drdynvcChannelId != 0)
             await HandleDvcAsync(VirtualChannel.Unwrap(data).ToArray(), ct);
+        else if (channelId == _rdpdrChannelId && _rdpdrChannelId != 0)
+            await HandleRdpdrAsync(VirtualChannel.Unwrap(data).ToArray(), ct);
     }
 
     /// <summary>Handles one CLIPRDR PDU: acks format lists, offers text, and serves it on request.</summary>
@@ -387,6 +413,142 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>
         WriteAsync(McsPdu.BuildSendDataIndication(_drdynvcChannelId, VirtualChannel.Wrap(dvcPdu)), ct);
 
+    // ── Drive redirection (MS-RDPEFS / rdpdr) ───────────────────────────────
+
+    /// <summary>Starts the rdpdr init handshake if there are client paths configured to read.</summary>
+    private async Task InitRdpdrAsync(CancellationToken ct)
+    {
+        if (_rdpdrChannelId == 0 || _rdpdrReads.Count == 0) return;
+        await SendRdpdrAsync(Rdpdr.ServerAnnounceReq(1), ct);
+        log.LogInformation("rdpdr ready on {Channel}: sent Server Announce; will read {Count} client path(s).",
+            _rdpdrChannelId, _rdpdrReads.Count);
+    }
+
+    /// <summary>Drives the rdpdr init handshake, then reads the configured files from the client.</summary>
+    private async Task HandleRdpdrAsync(byte[] pdu, CancellationToken ct)
+    {
+        log.LogDebug("rdpdr recv packetId=0x{Id:X4} ({Len} bytes).", Rdpdr.PacketId(pdu), pdu.Length);
+        switch (Rdpdr.PacketId(pdu))
+        {
+            case Rdpdr.ClientName: // follows the client's announce reply — now negotiate capabilities
+                await SendRdpdrAsync(Rdpdr.ServerCapabilityReq(), ct);
+                await SendRdpdrAsync(Rdpdr.ServerClientIdConfirm(1), ct);
+                await SendRdpdrAsync(Rdpdr.UserLoggedOnPdu(), ct);
+                break;
+
+            case Rdpdr.DeviceListAnnounce:
+                var devices = Rdpdr.ParseDeviceList(pdu);
+                int fsAdded = 0;
+                foreach (var d in devices)
+                {
+                    await SendRdpdrAsync(Rdpdr.DeviceAnnounceResponse(d.Id, 0), ct);
+                    log.LogDebug("rdpdr: device type=0x{Type:X8} id={Id} name='{Dos}'.", d.Type, d.Id, d.DosName);
+                    if (d.Type == Rdpdr.DeviceTypeFilesystem && d.DosName.Length >= 1)
+                    {
+                        _rdpdrDrives[char.ToUpperInvariant(d.DosName[0])] = d.Id;
+                        fsAdded++;
+                        log.LogInformation("rdpdr: client redirected drive {Dos} (device {Id}).", d.DosName, d.Id);
+                    }
+                }
+                // Only begin reads once at least one filesystem drive is available (the client
+                // may send an empty announce first, then the drives in a later one).
+                if (_rdpdrIo == RdpdrIo.Idle && fsAdded > 0) await StartNextRdpdrReadAsync(ct);
+                break;
+
+            case Rdpdr.DeviceIoCompletion:
+                await HandleRdpdrCompletionAsync(pdu, ct);
+                break;
+        }
+    }
+
+    private async Task StartNextRdpdrReadAsync(CancellationToken ct)
+    {
+        while (_rdpdrReads.Count > 0)
+        {
+            var clientPath = _rdpdrReads.Dequeue();
+            if (clientPath.Length < 3 || clientPath[1] != ':')
+            {
+                log.LogWarning("rdpdr: skipping non-drive path '{Path}'.", clientPath);
+                continue;
+            }
+            char letter = char.ToUpperInvariant(clientPath[0]);
+            if (!_rdpdrDrives.TryGetValue(letter, out var deviceId))
+            {
+                log.LogWarning("rdpdr: drive {Letter}: not redirected; cannot read '{Path}'.", letter, clientPath);
+                continue;
+            }
+
+            var rel = clientPath[2..].Replace('/', '\\');
+            if (!rel.StartsWith('\\')) rel = "\\" + rel;
+
+            _rdpdrPath = clientPath;
+            _rdpdrDeviceId = deviceId;
+            _rdpdrOffset = 0;
+            _rdpdrBytes = 0;
+            _rdpdrHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            _rdpdrIo = RdpdrIo.Create;
+            await SendRdpdrAsync(Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel), ct);
+            log.LogInformation("rdpdr: opening '{Path}' over the redirected drive.", clientPath);
+            return;
+        }
+        _rdpdrIo = RdpdrIo.Idle;
+        log.LogInformation("rdpdr: all reads complete.");
+    }
+
+    private async Task HandleRdpdrCompletionAsync(byte[] pdu, CancellationToken ct)
+    {
+        var c = Rdpdr.ParseIoCompletion(pdu);
+        switch (_rdpdrIo)
+        {
+            case RdpdrIo.Create:
+                if (c.IoStatus != 0)
+                {
+                    log.LogWarning("rdpdr: open of '{Path}' failed (status 0x{Status:X8}).", _rdpdrPath, c.IoStatus);
+                    await StartNextRdpdrReadAsync(ct);
+                    return;
+                }
+                _rdpdrFileId = Rdpdr.CreateFileId(c.Rest);
+                _rdpdrIo = RdpdrIo.Read;
+                await SendReadAsync(ct);
+                break;
+
+            case RdpdrIo.Read:
+                if (c.IoStatus != 0) { await FinishRdpdrReadAsync(ct); return; } // e.g. STATUS_END_OF_FILE
+                var data = Rdpdr.ReadData(c.Rest);
+                if (data.Length > 0)
+                {
+                    _rdpdrHash!.AppendData(data);
+                    _rdpdrBytes += data.Length;
+                    _rdpdrOffset += (ulong)data.Length;
+                }
+                if (data.Length < RdpdrReadChunk || _rdpdrBytes >= RdpdrReadCap)
+                    await FinishRdpdrReadAsync(ct);
+                else
+                    await SendReadAsync(ct);
+                break;
+
+            case RdpdrIo.Close:
+                await StartNextRdpdrReadAsync(ct);
+                break;
+        }
+    }
+
+    private Task SendReadAsync(CancellationToken ct) =>
+        SendRdpdrAsync(Rdpdr.ReadRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, RdpdrReadChunk, _rdpdrOffset), ct);
+
+    private async Task FinishRdpdrReadAsync(CancellationToken ct)
+    {
+        var hash = _rdpdrHash is not null ? Convert.ToHexString(_rdpdrHash.GetHashAndReset()).ToLowerInvariant() : "";
+        bool capped = _rdpdrBytes >= RdpdrReadCap;
+        log.LogInformation("rdpdr: READ '{Path}' -> {Bytes} bytes{Capped}, sha256={Hash}",
+            _rdpdrPath, _rdpdrBytes, capped ? " (capped)" : "", hash);
+        _rdpdrIo = RdpdrIo.Close;
+        await SendRdpdrAsync(Rdpdr.CloseRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId), ct);
+    }
+
+    private Task SendRdpdrAsync(byte[] pdu, CancellationToken ct) =>
+        WriteAsync(McsPdu.BuildSendDataIndication(_rdpdrChannelId, VirtualChannel.Wrap(pdu)), ct);
+
     /// <summary>Decodes fast-path input and draws a marker where the mouse moves/clicks.</summary>
     private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)
     {
@@ -421,8 +583,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task<(bool FastPath, byte Header, byte[] Payload)?> ReadFrameAsync(CancellationToken ct)
     {
         var first = new byte[1];
+        // A clean EOF or a forcible close (client just disconnected) both mean "no more frames".
         try { await _stream.ReadExactlyAsync(first, ct); }
         catch (EndOfStreamException) { return null; }
+        catch (IOException) { return null; }
 
         if (first[0] == Tpkt.Version)
         {

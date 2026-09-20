@@ -17,6 +17,7 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 | M5 | Keyboard/mouse input | ✅ done |
 | M6 | Clipboard virtual channel (CLIPRDR) | ✅ done |
 | M7 | Dynamic virtual channels (DRDYNVC / MS-RDPEDYC) | ✅ done |
+| M8 | Drive redirection read-back (rdpdr / MS-RDPEFS) | ✅ done |
 
 All originally planned milestones are complete: a real RDP client connects end-to-end,
 sees rendered graphics, drives the screen with keyboard/mouse, and exchanges clipboard
@@ -60,7 +61,10 @@ dotnet run --project src/MockRdp -- --dvc "dvc::diag::inspector"   # open a spec
 ```
 
 Server flags: `--port <n>` (default 3389), `--bind <ip>`, `--log-level trace|debug|info|warn|error`,
-`--dvc <name[,name...]>` (dynamic virtual channels to open; default `ECHO`).
+`--dvc <name[,name...]>` (dynamic virtual channels to open; default `ECHO`),
+`--rdpdr-read <clientPath[,clientPath...]>` (read files back from the client's redirected
+drives over `rdpdr`/`\\tsclient`, logging bytes + sha256 — e.g. verify what an installer
+redirects; reads are capped per file).
 
 ## CI & prebuilt binary
 
