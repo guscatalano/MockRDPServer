@@ -55,7 +55,7 @@ public class DesktopInputTests
     {
         using var d = new FakeDesktop(1024, 768);
         Assert.Equal(1, d.WindowCount);
-        Assert.True(d.OnInput(LeftClick(590, 100))); // the Welcome window's close button
+        Assert.True(d.OnInput(LeftClick(632, 105))); // the Welcome window's close button (x=130, w=520)
         Assert.Equal(0, d.WindowCount);
     }
 
@@ -73,5 +73,19 @@ public class DesktopInputTests
         d.OnInput(LeftClick(300, 146));              // press on title bar of the launched window
         var moved = d.OnInput(new InputEvent(InputEventType.Mouse, Input.PtrFlagsMove, 340, 200, 0));
         Assert.True(moved);                          // dragging re-renders
+    }
+
+    [Fact]
+    public void Explorer_BrowsesFolder_AndOpensFileInNotepad()
+    {
+        using var d = new FakeDesktop(1024, 768);
+        d.OnInput(LeftClick(10, 748));               // Start
+        d.OnInput(LeftClick(20, 574));               // File Explorer (opens at the user's home)
+        Assert.Equal(2, d.WindowCount);
+
+        d.OnInput(LeftClick(250, 220));              // navigate into Documents (a folder → no new window)
+        Assert.Equal(2, d.WindowCount);
+        d.OnInput(LeftClick(250, 220));              // open readme.txt (a file → Notepad opens)
+        Assert.Equal(3, d.WindowCount);
     }
 }

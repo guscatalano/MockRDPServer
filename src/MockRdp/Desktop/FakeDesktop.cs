@@ -26,10 +26,14 @@ public sealed class FakeDesktop : IDisposable
     public bool StartMenuOpen { get; set; }
     public int WindowCount => _windows.Count;
 
+    private enum WinKind { Generic, Explorer, Notepad }
+
     private sealed class Win
     {
+        public WinKind Kind = WinKind.Generic;
         public required string Title;
-        public required string Body;
+        public string Body = "";
+        public VfsNode? Folder;   // Explorer: the current directory
         public int X, Y, W, H;
     }
 
@@ -37,6 +41,9 @@ public sealed class FakeDesktop : IDisposable
     private Win? _drag;
     private int _dragDx, _dragDy;
     private bool _ctrl, _alt;
+
+    private readonly VfsNode _vfsRoot;
+    private readonly VfsNode _vfsHome;
 
     private readonly Image<Rgba32> _fb;
     private readonly Font? _font;
@@ -58,7 +65,9 @@ public sealed class FakeDesktop : IDisposable
         _fb = new Image<Rgba32>(width, height);
         _font = TryLoadFont(15);
         _small = TryLoadFont(12);
-        _windows.Add(new Win { Title = "Welcome to mock-rdp", Body = "Click Start to launch apps, drag windows, Ctrl+Alt+End for the secure desktop.", X = 130, Y = 90, W = 480, H = 300 });
+        _vfsRoot = Vfs.BuildDefault();
+        _vfsHome = Vfs.Home(_vfsRoot);
+        _windows.Add(new Win { Title = "Welcome to mock-rdp", Body = "Click Start → File Explorer to browse C:\\, drag windows, Ctrl+Alt+End for the secure desktop.", X = 130, Y = 90, W = 520, H = 300 });
         Render();
     }
 
@@ -141,9 +150,36 @@ public sealed class FakeDesktop : IDisposable
                 _drag = w; _dragDx = x - w.X; _dragDy = y - w.Y;
                 return false; // no visual change yet
             }
-            if (InRect(x, y, w.X, w.Y, w.W, w.H)) { if (Raise(i)) { Render(); return true; } return false; }
+            if (InRect(x, y, w.X, w.Y, w.W, w.H))
+            {
+                bool raised = Raise(i);
+                bool acted = w.Kind == WinKind.Explorer && ExplorerClick(w, x, y);
+                if (raised || acted) { Render(); return true; }
+                return false;
+            }
         }
         return false;
+    }
+
+    /// <summary>A click in a File Explorer window: navigate into a folder, up via "..", or
+    /// open a file into Notepad.</summary>
+    private bool ExplorerClick(Win w, int x, int y)
+    {
+        if (w.Folder is null) return false;
+        int listTop = w.Y + TitleH + 30;
+        const int rowH = 22;
+        if (y < listTop) return false;
+        int row = (y - listTop) / rowH;
+
+        bool hasParent = w.Folder.Parent is not null;
+        if (hasParent && row == 0) { w.Folder = w.Folder.Parent; return true; }
+
+        int idx = row - (hasParent ? 1 : 0);
+        if (idx < 0 || idx >= w.Folder.Children.Count) return false;
+        var entry = w.Folder.Children[idx];
+        if (entry.IsDir) { w.Folder = entry; return true; }
+        OpenNotepad(entry.Name, entry.Text);
+        return true;
     }
 
     private bool OnMouseMove(int x, int y)
@@ -173,15 +209,24 @@ public sealed class FakeDesktop : IDisposable
 
     private void Launch(string app)
     {
-        string body = app switch
+        switch (app)
         {
-            "File Explorer" => "This PC \\ C:\\  —  a browsable filesystem lands in Phase 3.",
-            "Notepad" => "Untitled — a typeable editor lands in Phase 3.",
-            "Settings" => "Settings.",
-            _ => "Run: type a command…",
-        };
+            case "File Explorer": Open(new Win { Kind = WinKind.Explorer, Title = "File Explorer", Folder = _vfsHome, W = 480, H = 320 }); break;
+            case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
+            case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
+            default: Open(new Win { Title = "Run", Body = "Run: type a command…", W = 420, H = 140 }); break;
+        }
+    }
+
+    private void OpenNotepad(string name, string text) =>
+        Open(new Win { Kind = WinKind.Notepad, Title = name + " — Notepad", Body = text, W = 460, H = 320 });
+
+    private void Open(Win w)
+    {
         int n = _windows.Count;
-        _windows.Add(new Win { Title = app, Body = body, X = 160 + n * 26, Y = 120 + n * 26, W = 420, H = 260 });
+        w.X = 160 + n * 26;
+        w.Y = 110 + n * 26;
+        _windows.Add(w);
     }
 
     private bool Switch(DesktopKind kind)
@@ -232,7 +277,44 @@ public sealed class FakeDesktop : IDisposable
         Text(ctx, _font, w.Title, w.X + 10, w.Y + 7, Color.White);
         Fill(ctx, "C23030", w.X + w.W - CloseW, w.Y, CloseW, TitleH);
         Text(ctx, _font, "x", w.X + w.W - 19, w.Y + 6, Color.White);
-        Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020"));
+
+        switch (w.Kind)
+        {
+            case WinKind.Explorer: DrawExplorer(ctx, w); break;
+            case WinKind.Notepad: DrawNotepad(ctx, w); break;
+            default: Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020")); break;
+        }
+    }
+
+    private void DrawExplorer(IImageProcessingContext ctx, Win w)
+    {
+        if (w.Folder is null) return;
+        Fill(ctx, "E4E4E4", w.X, w.Y + TitleH, w.W, 24);
+        Text(ctx, _small, w.Folder.Path, w.X + 12, w.Y + TitleH + 5, Color.ParseHex("303030"));
+
+        int yy = w.Y + TitleH + 30;
+        void Row(string name, bool dir)
+        {
+            if (yy + 22 > w.Y + w.H - 4) return;
+            Fill(ctx, dir ? "E8C24A" : "B7B7B7", w.X + 14, yy + 5, 14, 11);
+            Text(ctx, _small, name, w.X + 36, yy + 3, Color.ParseHex("101010"));
+            yy += 22;
+        }
+
+        if (w.Folder.Parent is not null) Row("..", true);
+        foreach (var child in w.Folder.Children) Row(child.Name, child.IsDir);
+    }
+
+    private void DrawNotepad(IImageProcessingContext ctx, Win w)
+    {
+        Fill(ctx, "FFFFFF", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
+        int yy = w.Y + TitleH + 12;
+        foreach (var line in w.Body.Replace("\r\n", "\n").Split('\n'))
+        {
+            if (yy > w.Y + w.H - 18) break;
+            Text(ctx, _small, line, w.X + 14, yy, Color.ParseHex("101010"));
+            yy += 16;
+        }
     }
 
     private void RenderSecure(IImageProcessingContext ctx)

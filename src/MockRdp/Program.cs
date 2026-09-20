@@ -29,10 +29,11 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
     if (args.Contains("--start-menu")) shot.StartMenuOpen = true;
     if (args.Contains("--demo"))
     {
-        // Launch two apps via synthetic Start-menu clicks, so the shot shows the window manager.
+        // Synthetic clicks: open File Explorer, browse into Documents, open readme.txt in Notepad.
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 574)); // File Explorer
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 610)); // Notepad
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 574)); // Start → File Explorer
+        shot.OnInput(Click(250, 220)); // into Documents
+        shot.OnInput(Click(250, 220)); // open readme.txt → Notepad
     }
     shot.Render();
     shot.SavePng(args[ssIdx + 1]);

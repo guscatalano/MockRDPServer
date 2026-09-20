@@ -79,9 +79,10 @@ Fake desktop (experimental — a software-rendered, interactive Windows-like ses
 - `--desktop` — render a fake desktop instead of the colour test pattern, with a tiny window
   manager: the **Start** menu launches cascading windows, windows are **draggable** by their
   title bar (with z-order) and closable via **×**, and only changed tiles are resent
-  (dirty-rect). Press **Ctrl+Alt+End** (the remote secure-attention sequence) to switch to
-  the **secure / Winlogon desktop**; **Esc** returns. Mirrors Windows' Default vs. Secure
-  desktops.
+  (dirty-rect). **File Explorer** browses an in-memory filesystem (`C:\Windows`, `C:\Users`,
+  …) — click folders to navigate, `..` to go up, a file to open it in **Notepad**. Press
+  **Ctrl+Alt+End** (the remote secure-attention sequence) to switch to the **secure /
+  Winlogon desktop**; **Esc** returns. Mirrors Windows' Default vs. Secure desktops.
 - `--screenshot <path.png> [--secure] [--start-menu] [--demo]` — render one frame of a chosen
   state to a PNG and exit (no server); `--demo` launches a couple of windows first.
 
