@@ -32,3 +32,6 @@ Thumbs.db
 *.trx
 coverage*.json
 coverage*.xml
+
+# Publish output
+publish/
