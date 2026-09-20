@@ -27,7 +27,13 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
     using var shot = new MockRdp.Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight);
     if (args.Contains("--secure")) shot.Active = MockRdp.Desktop.DesktopKind.Secure;
     if (args.Contains("--start-menu")) shot.StartMenuOpen = true;
-    if (args.Contains("--no-window")) shot.WindowOpen = false;
+    if (args.Contains("--demo"))
+    {
+        // Launch two apps via synthetic Start-menu clicks, so the shot shows the window manager.
+        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 574)); // File Explorer
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 610)); // Notepad
+    }
     shot.Render();
     shot.SavePng(args[ssIdx + 1]);
     Console.WriteLine($"Wrote desktop screenshot to {args[ssIdx + 1]}");

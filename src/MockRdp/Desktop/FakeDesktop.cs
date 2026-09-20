@@ -13,11 +13,10 @@ namespace MockRdp.Desktop;
 public enum DesktopKind { Default, Secure }
 
 /// <summary>
-/// A software-rendered fake Windows session. Owns a framebuffer and the state of the
-/// interactive desktop (Start menu, a window) and the secure/Winlogon desktop, switches
-/// between them, and turns client input into state changes. Phase 1: cursor is the client's
-/// own; input drives clicks (Start menu, window close) and the Secure Attention Sequence
-/// (Ctrl+Alt+End) flips to the secure desktop; Esc returns.
+/// A software-rendered fake Windows session with a tiny window manager. Owns a framebuffer,
+/// a list of draggable windows, a Start menu that launches windows, and a secure/Winlogon
+/// desktop reached via the secure-attention sequence. Turns client input into state changes
+/// and exposes changed tiles (dirty-rect) for the RDP output path.
 /// </summary>
 public sealed class FakeDesktop : IDisposable
 {
@@ -25,16 +24,32 @@ public sealed class FakeDesktop : IDisposable
     public int Height { get; }
     public DesktopKind Active { get; set; } = DesktopKind.Default;
     public bool StartMenuOpen { get; set; }
-    public bool WindowOpen { get; set; } = true;
+    public int WindowCount => _windows.Count;
+
+    private sealed class Win
+    {
+        public required string Title;
+        public required string Body;
+        public int X, Y, W, H;
+    }
+
+    private readonly List<Win> _windows = new();   // z-order: last = topmost
+    private Win? _drag;
+    private int _dragDx, _dragDy;
+    private bool _ctrl, _alt;
 
     private readonly Image<Rgba32> _fb;
     private readonly Font? _font;
     private readonly Font? _small;
-    private bool _ctrl, _alt;
+    private ulong[]? _tileHash;
 
     private const int Taskbar = 44;
-    private static readonly int[] Win = [130, 90, 480, 320]; // x, y, w, h
+    private const int TitleH = 30;
+    private const int CloseW = 30;
     private const int StartW = 92;
+    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Settings", "Run…"];
+    private const int MenuW = 240;
+    private const int MenuRow = 36;
 
     public FakeDesktop(int width, int height)
     {
@@ -43,6 +58,7 @@ public sealed class FakeDesktop : IDisposable
         _fb = new Image<Rgba32>(width, height);
         _font = TryLoadFont(15);
         _small = TryLoadFont(12);
+        _windows.Add(new Win { Title = "Welcome to mock-rdp", Body = "Click Start to launch apps, drag windows, Ctrl+Alt+End for the secure desktop.", X = 130, Y = 90, W = 480, H = 300 });
         Render();
     }
 
@@ -61,11 +77,17 @@ public sealed class FakeDesktop : IDisposable
     {
         switch (ev.Type)
         {
-            case InputEventType.Scancode: return OnKey(ev.Code, (ev.Flags & 0x01) != 0);
+            case InputEventType.Scancode:
+                return OnKey(ev.Code, (ev.Flags & 0x01) != 0);
             case InputEventType.Mouse:
-                bool leftDown = (ev.Flags & Input.PtrFlagsDown) != 0 && (ev.Flags & Input.PtrFlagsButton1) != 0;
-                return leftDown && OnClick(ev.X, ev.Y);
-            default: return false;
+                bool btn1 = (ev.Flags & Input.PtrFlagsButton1) != 0;
+                bool down = (ev.Flags & Input.PtrFlagsDown) != 0;
+                if (btn1 && down) return OnMouseDown(ev.X, ev.Y);
+                if (btn1 && !down) return OnMouseUp();
+                if (_drag is not null && (ev.Flags & Input.PtrFlagsMove) != 0) return OnMouseMove(ev.X, ev.Y);
+                return false;
+            default:
+                return false;
         }
     }
 
@@ -73,11 +95,10 @@ public sealed class FakeDesktop : IDisposable
     {
         switch (scancode)
         {
-            case 0x1D: _ctrl = !release; return false;                 // Ctrl
-            case 0x38: _alt = !release; return false;                  // Alt
-            case 0x4F when !release && _ctrl && _alt:                  // End -> SAS
-                return Switch(DesktopKind.Secure);
-            case 0x01 when !release:                                    // Esc
+            case 0x1D: _ctrl = !release; return false;
+            case 0x38: _alt = !release; return false;
+            case 0x4F when !release && _ctrl && _alt: return Switch(DesktopKind.Secure);
+            case 0x01 when !release:
                 if (Active == DesktopKind.Secure) return Switch(DesktopKind.Default);
                 if (StartMenuOpen) { StartMenuOpen = false; Render(); return true; }
                 return false;
@@ -85,16 +106,82 @@ public sealed class FakeDesktop : IDisposable
         }
     }
 
-    private bool OnClick(int x, int y)
+    private bool OnMouseDown(int x, int y)
     {
         if (Active == DesktopKind.Secure)
             return InRect(x, y, CancelBtn()) && Switch(DesktopKind.Default);
 
         int tbY = Height - Taskbar;
         if (InRect(x, y, 0, tbY, StartW, Taskbar)) { StartMenuOpen = !StartMenuOpen; Render(); return true; }
-        if (StartMenuOpen) { StartMenuOpen = false; Render(); return true; } // any click dismisses (items are Phase 2)
-        if (WindowOpen && InRect(x, y, Win[0] + Win[2] - 30, Win[1], 30, 30)) { WindowOpen = false; Render(); return true; }
+
+        if (StartMenuOpen)
+        {
+            int my = tbY - MenuItems.Length * MenuRow - 12;
+            for (int i = 0; i < MenuItems.Length; i++)
+                if (InRect(x, y, 0, my + i * MenuRow + 6, MenuW, MenuRow))
+                {
+                    Launch(MenuItems[i]);
+                    StartMenuOpen = false;
+                    Render();
+                    return true;
+                }
+            StartMenuOpen = false;
+            Render();
+            return true;
+        }
+
+        // Topmost window first.
+        for (int i = _windows.Count - 1; i >= 0; i--)
+        {
+            var w = _windows[i];
+            if (InRect(x, y, w.X + w.W - CloseW, w.Y, CloseW, TitleH)) { _windows.RemoveAt(i); Render(); return true; }
+            if (InRect(x, y, w.X, w.Y, w.W, TitleH)) // title bar → raise + drag
+            {
+                Raise(i);
+                _drag = w; _dragDx = x - w.X; _dragDy = y - w.Y;
+                return false; // no visual change yet
+            }
+            if (InRect(x, y, w.X, w.Y, w.W, w.H)) { if (Raise(i)) { Render(); return true; } return false; }
+        }
         return false;
+    }
+
+    private bool OnMouseMove(int x, int y)
+    {
+        if (_drag is null) return false;
+        _drag.X = Math.Clamp(x - _dragDx, -_drag.W + 80, Width - 80);
+        _drag.Y = Math.Clamp(y - _dragDy, 0, Height - Taskbar - TitleH);
+        Render();
+        return true;
+    }
+
+    private bool OnMouseUp()
+    {
+        bool wasDragging = _drag is not null;
+        _drag = null;
+        return wasDragging;   // final position already rendered during move; report a change to flush
+    }
+
+    private bool Raise(int index)
+    {
+        if (index == _windows.Count - 1) return false;
+        var w = _windows[index];
+        _windows.RemoveAt(index);
+        _windows.Add(w);
+        return true;
+    }
+
+    private void Launch(string app)
+    {
+        string body = app switch
+        {
+            "File Explorer" => "This PC \\ C:\\  —  a browsable filesystem lands in Phase 3.",
+            "Notepad" => "Untitled — a typeable editor lands in Phase 3.",
+            "Settings" => "Settings.",
+            _ => "Run: type a command…",
+        };
+        int n = _windows.Count;
+        _windows.Add(new Win { Title = app, Body = body, X = 160 + n * 26, Y = 120 + n * 26, W = 420, H = 260 });
     }
 
     private bool Switch(DesktopKind kind)
@@ -102,20 +189,18 @@ public sealed class FakeDesktop : IDisposable
         if (Active == kind) return false;
         Active = kind;
         StartMenuOpen = false;
+        _drag = null;
         Render();
         return true;
     }
 
     // ── rendering ─────────────────────────────────────────────────────────────
 
-    public void Render()
+    public void Render() => _fb.Mutate(ctx =>
     {
-        _fb.Mutate(ctx =>
-        {
-            if (Active == DesktopKind.Secure) RenderSecure(ctx);
-            else RenderDefault(ctx);
-        });
-    }
+        if (Active == DesktopKind.Secure) RenderSecure(ctx);
+        else RenderDefault(ctx);
+    });
 
     private void RenderDefault(IImageProcessingContext ctx)
     {
@@ -123,23 +208,15 @@ public sealed class FakeDesktop : IDisposable
         ctx.Fill(new LinearGradientBrush(new PointF(0, 0), new PointF(0, Height), GradientRepetitionMode.None,
             new ColorStop(0f, Color.ParseHex("103A6B")), new ColorStop(1f, Color.ParseHex("2B6AB0"))));
 
-        if (WindowOpen)
-        {
-            Fill(ctx, "F2F2F2", Win[0], Win[1], Win[2], Win[3]);
-            Fill(ctx, "005A9E", Win[0], Win[1], Win[2], 30);
-            Text(ctx, _font, "Welcome to mock-rdp", Win[0] + 10, Win[1] + 7, Color.White);
-            Fill(ctx, "C23030", Win[0] + Win[2] - 30, Win[1], 30, 30);
-            Text(ctx, _font, "x", Win[0] + Win[2] - 19, Win[1] + 6, Color.White);
-            Text(ctx, _small, "Click Start, close this window, or press Ctrl+Alt+End.", Win[0] + 14, Win[1] + 50, Color.ParseHex("202020"));
-        }
+        foreach (var w in _windows) DrawWindow(ctx, w);
 
         if (StartMenuOpen)
         {
-            int mh = 220, my = tbY - mh;
-            Fill(ctx, "2A2A2A", 0, my, 240, mh);
-            string[] items = ["File Explorer", "Notepad", "Settings", "Run…"];
-            for (int i = 0; i < items.Length; i++)
-                Text(ctx, _font, items[i], 18, my + 18 + i * 34, Color.White);
+            int mh = MenuItems.Length * MenuRow + 12;
+            int my = tbY - mh;
+            Fill(ctx, "2A2A2A", 0, my, MenuW, mh);
+            for (int i = 0; i < MenuItems.Length; i++)
+                Text(ctx, _font, MenuItems[i], 18, my + i * MenuRow + 10, Color.White);
         }
 
         Fill(ctx, "1F1F1F", 0, tbY, Width, Taskbar);
@@ -148,9 +225,19 @@ public sealed class FakeDesktop : IDisposable
         Text(ctx, _small, DateTime.Now.ToString("h:mm tt"), Width - 74, tbY + 15, Color.White);
     }
 
+    private void DrawWindow(IImageProcessingContext ctx, Win w)
+    {
+        Fill(ctx, "F2F2F2", w.X, w.Y, w.W, w.H);
+        Fill(ctx, "005A9E", w.X, w.Y, w.W, TitleH);
+        Text(ctx, _font, w.Title, w.X + 10, w.Y + 7, Color.White);
+        Fill(ctx, "C23030", w.X + w.W - CloseW, w.Y, CloseW, TitleH);
+        Text(ctx, _font, "x", w.X + w.W - 19, w.Y + 6, Color.White);
+        Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020"));
+    }
+
     private void RenderSecure(IImageProcessingContext ctx)
     {
-        ctx.Fill(Color.ParseHex("0A0A14")); // dimmed secure background
+        ctx.Fill(Color.ParseHex("0A0A14"));
         var (dx, dy, dw, dh) = Dialog();
         Fill(ctx, "1B1B2A", dx, dy, dw, dh);
         Fill(ctx, "3A3A55", dx, dy, dw, 34);
@@ -195,24 +282,37 @@ public sealed class FakeDesktop : IDisposable
 
     public void SavePng(string path) => _fb.SaveAsPng(path);
 
-    public IEnumerable<(int X, int Y, int W, int H, ushort[] Pixels)> Tiles(int tile = 64)
+    /// <summary>Tiles whose pixels changed since the previous call (all tiles on first call).</summary>
+    public IEnumerable<(int X, int Y, int W, int H, ushort[] Pixels)> DirtyTiles(int tile = 64)
     {
+        int cols = (Width + tile - 1) / tile;
+        int rows = (Height + tile - 1) / tile;
+        _tileHash ??= new ulong[cols * rows];
+
         var buf = new Rgba32[Width * Height];
         _fb.CopyPixelDataTo(buf);
 
+        int idx = 0;
         for (int ty = 0; ty < Height; ty += tile)
-            for (int tx = 0; tx < Width; tx += tile)
+            for (int tx = 0; tx < Width; tx += tile, idx++)
             {
                 int tw = Math.Min(tile, Width - tx);
                 int th = Math.Min(tile, Height - ty);
                 var px = new ushort[tw * th];
+                ulong hash = 1469598103934665603UL;
                 for (int row = 0; row < th; row++)
                     for (int col = 0; col < tw; col++)
                     {
                         var p = buf[(ty + row) * Width + (tx + col)];
-                        px[row * tw + col] = (ushort)(((p.R >> 3) << 11) | ((p.G >> 2) << 5) | (p.B >> 3));
+                        ushort v = (ushort)(((p.R >> 3) << 11) | ((p.G >> 2) << 5) | (p.B >> 3));
+                        px[row * tw + col] = v;
+                        hash = (hash ^ v) * 1099511628211UL;
                     }
-                yield return (tx, ty, tw, th, px);
+                if (hash != _tileHash[idx])
+                {
+                    _tileHash[idx] = hash;
+                    yield return (tx, ty, tw, th, px);
+                }
             }
     }
 

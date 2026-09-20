@@ -282,7 +282,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task SendDesktopAsync(CancellationToken ct)
     {
         if (_desktop is null) return;
-        foreach (var (x, y, w, h, pixels) in _desktop.Tiles())
+        foreach (var (x, y, w, h, pixels) in _desktop.DirtyTiles())
             await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels)), ct);
     }
 
@@ -689,8 +689,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         if (changed && _desktop is not null)
         {
             await SendDesktopAsync(ct);
-            log.LogInformation("Desktop: active={Active} startMenu={Menu} window={Window}.",
-                _desktop.Active, _desktop.StartMenuOpen, _desktop.WindowOpen);
+            log.LogInformation("Desktop: active={Active} startMenu={Menu} windows={Windows}.",
+                _desktop.Active, _desktop.StartMenuOpen, _desktop.WindowCount);
         }
     }
 

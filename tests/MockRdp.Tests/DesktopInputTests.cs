@@ -54,8 +54,24 @@ public class DesktopInputTests
     public void ClickClose_ClosesWindow()
     {
         using var d = new FakeDesktop(1024, 768);
-        Assert.True(d.WindowOpen);
-        Assert.True(d.OnInput(LeftClick(590, 100))); // window close button
-        Assert.False(d.WindowOpen);
+        Assert.Equal(1, d.WindowCount);
+        Assert.True(d.OnInput(LeftClick(590, 100))); // the Welcome window's close button
+        Assert.Equal(0, d.WindowCount);
+    }
+
+    [Fact]
+    public void StartMenu_LaunchesWindow_AndDragMovesIt()
+    {
+        using var d = new FakeDesktop(1024, 768);
+        Assert.Equal(1, d.WindowCount);
+
+        d.OnInput(LeftClick(10, 748));               // open Start menu
+        Assert.True(d.OnInput(LeftClick(20, 724 - 160 + 10))); // click the first menu item
+        Assert.Equal(2, d.WindowCount);              // a window launched
+
+        // Drag the launched window by its title bar (press → move → release).
+        d.OnInput(LeftClick(300, 146));              // press on title bar of the launched window
+        var moved = d.OnInput(new InputEvent(InputEventType.Mouse, Input.PtrFlagsMove, 340, 200, 0));
+        Assert.True(moved);                          // dragging re-renders
     }
 }
