@@ -78,9 +78,11 @@ Drive redirection (`rdpdr` / `\\tsclient`), each takes client paths:
 Fake desktop (experimental — a software-rendered, interactive Windows-like session):
 - `--desktop` — render a fake desktop instead of the colour test pattern, with a tiny window
   manager: the **Start** menu launches cascading windows, windows are **draggable** by their
-  title bar (with z-order) and closable via **×**, and only changed tiles are resent
-  (dirty-rect). **File Explorer** browses an in-memory filesystem (`C:\Windows`, `C:\Users`,
-  …) — click folders to navigate, `..` to go up, a file to open it in **Notepad**. Press
+  title bar (with z-order) and closable via **×**, only changed tiles are resent (dirty-rect),
+  and the taskbar clock ticks. **File Explorer** browses an in-memory filesystem (`C:\Windows`,
+  `C:\Users`, …) — click folders to navigate, `..` to go up, a file to open it in **Notepad**.
+  **Keyboard** input works (scancode→char, US layout): type into Notepad, or into the **Run**
+  dialog (Start → Run…) and press Enter to launch `explorer` / `notepad` / `cmd`. Press
   **Ctrl+Alt+End** (the remote secure-attention sequence) to switch to the **secure /
   Winlogon desktop**; **Esc** returns. Mirrors Windows' Default vs. Secure desktops.
 - `--screenshot <path.png> [--secure] [--start-menu] [--demo]` — render one frame of a chosen

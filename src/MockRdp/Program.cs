@@ -35,6 +35,13 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
         shot.OnInput(Click(250, 220)); // into Documents
         shot.OnInput(Click(250, 220)); // open readme.txt → Notepad
     }
+    if (args.Contains("--demo-run"))
+    {
+        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
+        InputEvent K(byte sc) => new(InputEventType.Scancode, 0, 0, 0, sc);
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 690));   // Start → Run…
+        foreach (var sc in new byte[] { 0x31, 0x18, 0x14, 0x12, 0x19, 0x1E, 0x20 }) shot.OnInput(K(sc)); // "notepad"
+    }
     shot.Render();
     shot.SavePng(args[ssIdx + 1]);
     Console.WriteLine($"Wrote desktop screenshot to {args[ssIdx + 1]}");

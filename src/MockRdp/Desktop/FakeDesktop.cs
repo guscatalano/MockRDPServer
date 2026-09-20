@@ -25,8 +25,10 @@ public sealed class FakeDesktop : IDisposable
     public DesktopKind Active { get; set; } = DesktopKind.Default;
     public bool StartMenuOpen { get; set; }
     public int WindowCount => _windows.Count;
+    public string FocusedTitle => Focused?.Title ?? "";
+    public string FocusedText => Focused?.Body ?? "";
 
-    private enum WinKind { Generic, Explorer, Notepad }
+    private enum WinKind { Generic, Explorer, Notepad, Run }
 
     private sealed class Win
     {
@@ -40,7 +42,9 @@ public sealed class FakeDesktop : IDisposable
     private readonly List<Win> _windows = new();   // z-order: last = topmost
     private Win? _drag;
     private int _dragDx, _dragDy;
-    private bool _ctrl, _alt;
+    private bool _ctrl, _alt, _shift;
+
+    private Win? Focused => _windows.Count > 0 ? _windows[^1] : null;
 
     private readonly VfsNode _vfsRoot;
     private readonly VfsNode _vfsHome;
@@ -106,13 +110,62 @@ public sealed class FakeDesktop : IDisposable
         {
             case 0x1D: _ctrl = !release; return false;
             case 0x38: _alt = !release; return false;
-            case 0x4F when !release && _ctrl && _alt: return Switch(DesktopKind.Secure);
-            case 0x01 when !release:
-                if (Active == DesktopKind.Secure) return Switch(DesktopKind.Default);
-                if (StartMenuOpen) { StartMenuOpen = false; Render(); return true; }
-                return false;
-            default: return false;
+            case Keys.LShift or Keys.RShift: _shift = !release; return false;
         }
+        if (release) return false;
+
+        if (scancode == 0x4F && _ctrl && _alt) return Switch(DesktopKind.Secure);
+        if (scancode == 0x01) // Esc
+        {
+            if (Active == DesktopKind.Secure) return Switch(DesktopKind.Default);
+            if (StartMenuOpen) { StartMenuOpen = false; Render(); return true; }
+            return false;
+        }
+        if (Active == DesktopKind.Secure) return false;
+
+        // Text into the focused editable window.
+        var f = Focused;
+        if (f is null || (f.Kind != WinKind.Notepad && f.Kind != WinKind.Run)) return false;
+
+        if (scancode == Keys.Backspace)
+        {
+            if (f.Body.Length == 0) return false;
+            f.Body = f.Body[..^1];
+            Render();
+            return true;
+        }
+        if (scancode == Keys.Enter)
+        {
+            if (f.Kind == WinKind.Run) { RunCommand(f); return true; }
+            f.Body += "\r\n";
+            Render();
+            return true;
+        }
+        if (Keys.ScancodeToChar(scancode, _shift) is { } ch)
+        {
+            f.Body += ch;
+            Render();
+            return true;
+        }
+        return false;
+    }
+
+    private void RunCommand(Win run)
+    {
+        var raw = run.Body.Trim();
+        _windows.Remove(run);
+        switch (raw.ToLowerInvariant())
+        {
+            case "explorer" or "explorer.exe": Launch("File Explorer"); break;
+            case "notepad" or "notepad.exe": Launch("Notepad"); break;
+            case "cmd" or "cmd.exe" or "powershell":
+                Open(new Win { Title = raw, Body = "Microsoft Windows [fake]\r\n\r\nC:\\Users\\rdpuser> ", W = 480, H = 260 });
+                break;
+            default:
+                Open(new Win { Title = "Run", Body = raw.Length == 0 ? "Type a program name, then Enter." : $"Windows cannot find '{raw}'.", W = 420, H = 140 });
+                break;
+        }
+        Render();
     }
 
     private bool OnMouseDown(int x, int y)
@@ -214,7 +267,7 @@ public sealed class FakeDesktop : IDisposable
             case "File Explorer": Open(new Win { Kind = WinKind.Explorer, Title = "File Explorer", Folder = _vfsHome, W = 480, H = 320 }); break;
             case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
-            default: Open(new Win { Title = "Run", Body = "Run: type a command…", W = 420, H = 140 }); break;
+            default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
         }
     }
 
@@ -278,12 +331,22 @@ public sealed class FakeDesktop : IDisposable
         Fill(ctx, "C23030", w.X + w.W - CloseW, w.Y, CloseW, TitleH);
         Text(ctx, _font, "x", w.X + w.W - 19, w.Y + 6, Color.White);
 
+        bool focused = ReferenceEquals(w, Focused);
         switch (w.Kind)
         {
             case WinKind.Explorer: DrawExplorer(ctx, w); break;
-            case WinKind.Notepad: DrawNotepad(ctx, w); break;
+            case WinKind.Notepad: DrawNotepad(ctx, w, focused); break;
+            case WinKind.Run: DrawRun(ctx, w, focused); break;
             default: Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020")); break;
         }
+    }
+
+    private void DrawRun(IImageProcessingContext ctx, Win w, bool focused)
+    {
+        Text(ctx, _small, "Type the name of a program and press Enter:", w.X + 14, w.Y + TitleH + 14, Color.ParseHex("202020"));
+        Fill(ctx, "FFFFFF", w.X + 14, w.Y + TitleH + 40, w.W - 28, 26);
+        Text(ctx, _small, w.Body + (focused ? "_" : ""), w.X + 20, w.Y + TitleH + 45, Color.ParseHex("101010"));
+        Text(ctx, _small, "Try: explorer, notepad, cmd", w.X + 14, w.Y + TitleH + 82, Color.ParseHex("707070"));
     }
 
     private void DrawExplorer(IImageProcessingContext ctx, Win w)
@@ -305,13 +368,16 @@ public sealed class FakeDesktop : IDisposable
         foreach (var child in w.Folder.Children) Row(child.Name, child.IsDir);
     }
 
-    private void DrawNotepad(IImageProcessingContext ctx, Win w)
+    private void DrawNotepad(IImageProcessingContext ctx, Win w, bool focused)
     {
         Fill(ctx, "FFFFFF", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
+        var lines = w.Body.Replace("\r\n", "\n").Split('\n');
         int yy = w.Y + TitleH + 12;
-        foreach (var line in w.Body.Replace("\r\n", "\n").Split('\n'))
+        for (int i = 0; i < lines.Length; i++)
         {
             if (yy > w.Y + w.H - 18) break;
+            string line = lines[i];
+            if (focused && i == lines.Length - 1) line += "_"; // caret
             Text(ctx, _small, line, w.X + 14, yy, Color.ParseHex("101010"));
             yy += 16;
         }

@@ -286,12 +286,26 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels)), ct);
     }
 
-    /// <summary>M5: keeps the active session alive, reacting to client input.</summary>
+    /// <summary>M5: keeps the active session alive, reacting to client input. While idle it
+    /// periodically re-renders the desktop so the taskbar clock ticks (dirty-rect keeps that
+    /// to just the clock tile).</summary>
     private async Task ServeAsync(CancellationToken ct)
     {
+        Task<(bool FastPath, byte Header, byte[] Payload)?>? pending = null;
         while (!ct.IsCancellationRequested)
         {
-            var frame = await ReadFrameAsync(ct);
+            pending ??= ReadFrameAsync(ct);
+            var completed = await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(20), ct));
+            if (ct.IsCancellationRequested) return;
+
+            if (completed != pending)
+            {
+                if (_desktop is not null) { _desktop.Render(); await SendDesktopAsync(ct); }
+                continue; // input read is still pending
+            }
+
+            var frame = await pending;
+            pending = null;
             if (frame is null) { log.LogInformation("Client disconnected from active session."); return; }
 
             if (frame.Value.FastPath)

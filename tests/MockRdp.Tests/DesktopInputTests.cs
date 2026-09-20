@@ -17,6 +17,16 @@ public class DesktopInputTests
     private static InputEvent LeftClick(ushort x, ushort y) =>
         new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
 
+    private static void Type(FakeDesktop d, string s)
+    {
+        var map = new Dictionary<char, byte>
+        {
+            ['h'] = 0x23, ['i'] = 0x17, ['n'] = 0x31, ['o'] = 0x18, ['t'] = 0x14,
+            ['e'] = 0x12, ['p'] = 0x19, ['a'] = 0x1E, ['d'] = 0x20,
+        };
+        foreach (var c in s) d.OnInput(Key(map[c]));
+    }
+
     [Fact]
     public void CtrlAltEnd_SwitchesToSecure_EscReturns()
     {
@@ -87,5 +97,24 @@ public class DesktopInputTests
         Assert.Equal(2, d.WindowCount);
         d.OnInput(LeftClick(250, 220));              // open readme.txt (a file → Notepad opens)
         Assert.Equal(3, d.WindowCount);
+    }
+
+    [Fact]
+    public void Keyboard_TypesIntoNotepad()
+    {
+        using var d = new FakeDesktop(1024, 768);
+        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 620)); // Start → Notepad
+        Type(d, "hi");
+        Assert.Equal("hi", d.FocusedText);
+    }
+
+    [Fact]
+    public void Run_TypeProgramName_Launches()
+    {
+        using var d = new FakeDesktop(1024, 768);
+        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 690)); // Start → Run…
+        Type(d, "notepad");
+        d.OnInput(Key(0x1C));                         // Enter
+        Assert.Contains("Notepad", d.FocusedTitle);   // Run launched Notepad
     }
 }
