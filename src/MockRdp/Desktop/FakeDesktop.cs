@@ -33,12 +33,28 @@ public sealed class FakeDesktop : IDisposable
 
     private sealed class Win
     {
+        public int Id;
         public WinKind Kind = WinKind.Generic;
         public required string Title;
         public string Body = "";
-        public VfsNode? Folder;   // Explorer: the current directory
+        public VfsNode? Folder;                                   // Explorer: local VFS directory
+        public string? ClientPath;                                // Explorer: \\tsclient path (non-null = client mode)
+        public List<(string Name, bool IsDir)>? ClientEntries;    // client listing
+        public bool Loading;                                      // waiting on an rdpdr result
+        public int Scroll;                                        // Explorer: first visible row
         public int X, Y, W, H;
     }
+
+    private const int RowH = 22;
+
+    private int _nextWinId = 1;
+
+    /// <summary>Set by the host to browse the client's redirected files over rdpdr:
+    /// OnClientList(winId, path) requests a listing, OnClientOpen(winId, path) reads a file.</summary>
+    public Action<int, string>? OnClientList;
+    public Action<int, string>? OnClientOpen;
+
+    private const string TsClient = "\\\\tsclient";
 
     private readonly List<Win> _windows = new();   // z-order: last = topmost
     private Win? _drag;
@@ -77,7 +93,7 @@ public sealed class FakeDesktop : IDisposable
         _small = TryLoadFont(12);
         _vfsRoot = Vfs.BuildDefault();
         _vfsHome = Vfs.Home(_vfsRoot);
-        _windows.Add(new Win { Title = "Welcome to mock-rdp", Body = "Click Start → File Explorer to browse C:\\, drag windows, Ctrl+Alt+End for the secure desktop.", X = 130, Y = 90, W = 520, H = 300 });
+        _windows.Add(new Win { Id = _nextWinId++, Title = "Welcome to mock-rdp", Body = "Open File Explorer to browse C:\\ or \\\\tsclient (your files), drag windows, Ctrl+Alt+End for the secure desktop.", X = 130, Y = 90, W = 560, H = 300 });
         Render();
     }
 
@@ -99,6 +115,7 @@ public sealed class FakeDesktop : IDisposable
             case InputEventType.Scancode:
                 return OnKey(ev.Code, (ev.Flags & 0x01) != 0);
             case InputEventType.Mouse:
+                if ((ev.Flags & 0x0200) != 0) return OnWheel(ev.Flags);   // PTRFLAGS_WHEEL
                 bool btn1 = (ev.Flags & Input.PtrFlagsButton1) != 0;
                 bool down = (ev.Flags & Input.PtrFlagsDown) != 0;
                 if (btn1 && down) return OnMouseDown(ev.X, ev.Y);
@@ -218,20 +235,49 @@ public sealed class FakeDesktop : IDisposable
     /// open a file into Notepad.</summary>
     private bool ExplorerClick(Win w, int x, int y)
     {
-        if (w.Folder is null) return false;
         int listTop = w.Y + TitleH + 30;
-        const int rowH = 22;
         if (y < listTop) return false;
-        int row = (y - listTop) / rowH;
+        int row = (y - listTop) / RowH + w.Scroll;
 
+        if (w.ClientPath is not null) return ClientClick(w, row);
+        if (w.Folder is null) return false;
+
+        // Local rows: [ \\tsclient ] [ .. ? ] [ children ]
+        if (row == 0)
+        {
+            w.ClientPath = TsClient; w.ClientEntries = null; w.Loading = true; w.Scroll = 0;
+            OnClientList?.Invoke(w.Id, TsClient);
+            return true;
+        }
+        int r = row - 1;
         bool hasParent = w.Folder.Parent is not null;
-        if (hasParent && row == 0) { w.Folder = w.Folder.Parent; return true; }
-
-        int idx = row - (hasParent ? 1 : 0);
+        if (hasParent && r == 0) { w.Folder = w.Folder.Parent; w.Scroll = 0; return true; }
+        int idx = r - (hasParent ? 1 : 0);
         if (idx < 0 || idx >= w.Folder.Children.Count) return false;
         var entry = w.Folder.Children[idx];
-        if (entry.IsDir) { w.Folder = entry; return true; }
+        if (entry.IsDir) { w.Folder = entry; w.Scroll = 0; return true; }
         OpenNotepad(entry.Name, entry.Text);
+        return true;
+    }
+
+    private bool ClientClick(Win w, int row)
+    {
+        // Client rows: [ .. ] [ entries ]
+        if (row == 0)
+        {
+            var up = ClientParent(w.ClientPath!);
+            w.Scroll = 0;
+            if (up is null) { w.ClientPath = null; w.ClientEntries = null; w.Loading = false; return true; } // back to local C:
+            w.ClientPath = up; w.ClientEntries = null; w.Loading = true;
+            OnClientList?.Invoke(w.Id, up);
+            return true;
+        }
+        int idx = row - 1;
+        if (w.ClientEntries is null || idx < 0 || idx >= w.ClientEntries.Count) return false;
+        var e = w.ClientEntries[idx];
+        var child = w.ClientPath!.TrimEnd('\\') + "\\" + e.Name;
+        if (e.IsDir) { w.ClientPath = child; w.ClientEntries = null; w.Loading = true; w.Scroll = 0; OnClientList?.Invoke(w.Id, child); return true; }
+        OnClientOpen?.Invoke(w.Id, child);
         return true;
     }
 
@@ -242,6 +288,27 @@ public sealed class FakeDesktop : IDisposable
         _drag.Y = Math.Clamp(y - _dragDy, 0, Height - Taskbar - TitleH);
         return true;
     }
+
+    private bool OnWheel(ushort flags)
+    {
+        var w = Focused;
+        if (w is null || w.Kind != WinKind.Explorer) return false;
+        int delta = (flags & 0x0100) != 0 ? 3 : -3;   // PTRFLAGS_WHEEL_NEGATIVE → scroll down
+        int max = Math.Max(0, RowCount(w) - VisibleRows(w));
+        int ns = Math.Clamp(w.Scroll + delta, 0, max);
+        if (ns == w.Scroll) return false;
+        w.Scroll = ns;
+        return true;
+    }
+
+    private static int RowCount(Win w)
+    {
+        if (w.ClientPath is not null) return 1 + (w.ClientEntries?.Count ?? 0);          // ".." + entries
+        if (w.Folder is null) return 0;
+        return 1 + (w.Folder.Parent is not null ? 1 : 0) + w.Folder.Children.Count;      // \\tsclient + ".." + children
+    }
+
+    private static int VisibleRows(Win w) => Math.Max(1, (w.H - TitleH - 34) / RowH);
 
     private bool OnMouseUp()
     {
@@ -276,9 +343,32 @@ public sealed class FakeDesktop : IDisposable
     private void Open(Win w)
     {
         int n = _windows.Count;
+        w.Id = _nextWinId++;
         w.X = 160 + n * 26;
         w.Y = 110 + n * 26;
         _windows.Add(w);
+    }
+
+    private Win? FindWin(int id) => _windows.FirstOrDefault(w => w.Id == id);
+
+    /// <summary>Host delivers a client (\\tsclient) directory listing for a window.</summary>
+    public bool DeliverClientList(int winId, string clientPath, IReadOnlyList<(string Name, bool IsDir)> entries)
+    {
+        var w = FindWin(winId);
+        if (w is null) return false;
+        w.ClientPath = clientPath;
+        w.ClientEntries = new List<(string, bool)>(entries);
+        w.Loading = false;
+        return true;
+    }
+
+    /// <summary>Host delivers a client file's text; opens it in Notepad.</summary>
+    public void DeliverClientOpen(string name, string text) => OpenNotepad(name, text);
+
+    private static string? ClientParent(string path)
+    {
+        var segs = path.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        return segs.Length <= 1 ? null : "\\\\" + string.Join('\\', segs[..^1]);
     }
 
     private bool Switch(DesktopKind kind)
@@ -336,6 +426,9 @@ public sealed class FakeDesktop : IDisposable
             case WinKind.Run: DrawRun(ctx, w, focused); break;
             default: Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020")); break;
         }
+
+        // Black window border (drawn last so it sits on top of the content).
+        ctx.Draw(Color.Black, 2f, new RectangularPolygon(w.X, w.Y, w.W, w.H));
     }
 
     private void DrawRun(IImageProcessingContext ctx, Win w, bool focused)
@@ -348,21 +441,45 @@ public sealed class FakeDesktop : IDisposable
 
     private void DrawExplorer(IImageProcessingContext ctx, Win w)
     {
-        if (w.Folder is null) return;
         Fill(ctx, "E4E4E4", w.X, w.Y + TitleH, w.W, 24);
-        Text(ctx, _small, w.Folder.Path, w.X + 12, w.Y + TitleH + 5, Color.ParseHex("303030"));
-
-        int yy = w.Y + TitleH + 30;
-        void Row(string name, bool dir)
+        int listTop = w.Y + TitleH + 30;
+        int visible = VisibleRows(w);
+        int idx = 0, drawn = 0;
+        void Row(string name, string iconHex)
         {
-            if (yy + 22 > w.Y + w.H - 4) return;
-            Fill(ctx, dir ? "E8C24A" : "B7B7B7", w.X + 14, yy + 5, 14, 11);
+            if (idx++ < w.Scroll || drawn >= visible) return;
+            int yy = listTop + drawn * RowH;
+            Fill(ctx, iconHex, w.X + 14, yy + 5, 14, 11);
             Text(ctx, _small, name, w.X + 36, yy + 3, Color.ParseHex("101010"));
-            yy += 22;
+            drawn++;
         }
 
-        if (w.Folder.Parent is not null) Row("..", true);
-        foreach (var child in w.Folder.Children) Row(child.Name, child.IsDir);
+        if (w.ClientPath is not null)
+        {
+            Text(ctx, _small, w.ClientPath, w.X + 12, w.Y + TitleH + 5, Color.ParseHex("303030"));
+            if (w.Loading) { Text(ctx, _small, "Loading…", w.X + 16, listTop + 3, Color.ParseHex("606060")); return; }
+            Row("..", "E8C24A");
+            if (w.ClientEntries is not null)
+                foreach (var (name, isDir) in w.ClientEntries) Row(name, isDir ? "E8C24A" : "B7B7B7");
+        }
+        else if (w.Folder is not null)
+        {
+            Text(ctx, _small, w.Folder.Path, w.X + 12, w.Y + TitleH + 5, Color.ParseHex("303030"));
+            Row("\\\\tsclient  (this RDP client)", "4A80E8");
+            if (w.Folder.Parent is not null) Row("..", "E8C24A");
+            foreach (var child in w.Folder.Children) Row(child.Name, child.IsDir ? "E8C24A" : "B7B7B7");
+        }
+
+        // Scrollbar (track + thumb) when the list overflows.
+        int total = RowCount(w);
+        if (total > visible)
+        {
+            int sbX = w.X + w.W - 10, trackH = visible * RowH;
+            Fill(ctx, "D8D8D8", sbX, listTop, 8, trackH);
+            int thumbH = Math.Max(20, trackH * visible / total);
+            int thumbY = listTop + (trackH - thumbH) * w.Scroll / Math.Max(1, total - visible);
+            Fill(ctx, "9A9A9A", sbX, thumbY, 8, thumbH);
+        }
     }
 
     private void DrawNotepad(IImageProcessingContext ctx, Win w, bool focused)

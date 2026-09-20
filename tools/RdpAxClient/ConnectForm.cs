@@ -54,6 +54,7 @@ internal sealed class ConnectForm : Form
             // Level 1/2 authenticate over TLS (level 0 skips TLS and requests only standard RDP).
             Set(() => adv.AuthenticationLevel = _opts.AuthLevel);
             Set(() => adv.EnableAutoReconnect = false);
+            Set(() => adv.RedirectDrives = true); // expose the client's drives as \\tsclient
             Set(() => adv.GrabFocusOnConnect = false);
 
             TryPrint("NegotiateSecurityLayer", () => adv.NegotiateSecurityLayer);

@@ -65,7 +65,7 @@ public class DesktopInputTests
     {
         using var d = new FakeDesktop(1024, 768);
         Assert.Equal(1, d.WindowCount);
-        Assert.True(d.OnInput(LeftClick(632, 105))); // the Welcome window's close button (x=130, w=520)
+        Assert.True(d.OnInput(LeftClick(670, 105))); // the Welcome window's close button (x=130, w=560)
         Assert.Equal(0, d.WindowCount);
     }
 
@@ -93,9 +93,10 @@ public class DesktopInputTests
         d.OnInput(LeftClick(20, 574));               // File Explorer (opens at the user's home)
         Assert.Equal(2, d.WindowCount);
 
-        d.OnInput(LeftClick(250, 220));              // navigate into Documents (a folder → no new window)
+        // Rows now: \\tsclient(196), ..(218), Documents(240) — click Documents, then readme.txt.
+        d.OnInput(LeftClick(250, 250));              // navigate into Documents (a folder → no new window)
         Assert.Equal(2, d.WindowCount);
-        d.OnInput(LeftClick(250, 220));              // open readme.txt (a file → Notepad opens)
+        d.OnInput(LeftClick(250, 250));              // open readme.txt (a file → Notepad opens)
         Assert.Equal(3, d.WindowCount);
     }
 

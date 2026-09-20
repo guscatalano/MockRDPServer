@@ -43,6 +43,17 @@ public static class Vfs
     {
         var c = new VfsNode { Name = "C:", IsDir = true };
 
+        c.AddFile("README.txt",
+            "mock-rdp — fake desktop\r\n" +
+            "========================\r\n\r\n" +
+            "This is a MOCK RDP server. Its filesystem (this C:\\ drive) is entirely\r\n" +
+            "IN-MEMORY and PER-SESSION: it is rebuilt from scratch each time you connect,\r\n" +
+            "and everything here is DISCARDED when you disconnect.\r\n\r\n" +
+            "Nothing is stored permanently. Nothing is written to any real disk.\r\n\r\n" +
+            "\\\\tsclient shows your own machine's redirected drives (that IS your real\r\n" +
+            "filesystem, read over the RDP drive-redirection channel) — the mock only\r\n" +
+            "reads it on demand and keeps nothing.\r\n");
+
         var win = c.AddDir("Windows");
         win.AddDir("System32");
         win.AddFile("win.ini", "; for 16-bit app support\r\n[fonts]\r\n[extensions]\r\n");

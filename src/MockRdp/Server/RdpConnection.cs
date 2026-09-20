@@ -45,12 +45,23 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private static readonly byte[] RdpdrMarker = "rdpeek-mock was here\r\n"u8.ToArray();
     private enum RdpdrOp { Read, List, Write }
     private enum RdpdrPhase { Idle, Create, Transfer, Close }
+
+    /// <summary>One rdpdr operation. Config ops (from --rdpdr-*) just log; on-demand ops (the
+    /// desktop's \\tsclient browser) carry a callback that receives the entries or file bytes.</summary>
+    private sealed class RdpdrReq
+    {
+        public required RdpdrOp Op;
+        public required string Path;                                  // client path, e.g. C:\Users\...
+        public Action<List<(string Name, bool IsDir)>, byte[]>? Done; // null for config ops
+    }
+
     private ushort _rdpdrChannelId;
-    private readonly Queue<(RdpdrOp Op, string Path)> _rdpdrOps = BuildRdpdrOps(rdpdrReads, rdpdrLists, rdpdrWrites);
+    private readonly Queue<RdpdrReq> _rdpdrOps = BuildRdpdrOps(rdpdrReads, rdpdrLists, rdpdrWrites);
     private readonly Dictionary<char, uint> _rdpdrDrives = new();     // drive letter -> device id
-    private readonly List<string> _rdpdrNames = new();                // accumulated dir entries
+    private readonly List<(string Name, bool IsDir)> _rdpdrEntries = new();
+    private readonly List<byte> _rdpdrReadBytes = new();
     private uint _rdpdrCompletionId;
-    private RdpdrOp _rdpdrOp;
+    private RdpdrReq? _rdpdrCurrent;
     private RdpdrPhase _rdpdrPhase = RdpdrPhase.Idle;
     private string _rdpdrPath = "";
     private string _rdpdrRel = "";
@@ -60,12 +71,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private long _rdpdrBytes;
     private IncrementalHash? _rdpdrHash;
 
-    private static Queue<(RdpdrOp, string)> BuildRdpdrOps(string[]? reads, string[]? lists, string[]? writes)
+    private RdpdrOp _rdpdrOp => _rdpdrCurrent?.Op ?? RdpdrOp.List;
+
+    private static Queue<RdpdrReq> BuildRdpdrOps(string[]? reads, string[]? lists, string[]? writes)
     {
-        var q = new Queue<(RdpdrOp, string)>();
-        foreach (var p in reads ?? []) q.Enqueue((RdpdrOp.Read, p));
-        foreach (var p in lists ?? []) q.Enqueue((RdpdrOp.List, p));
-        foreach (var p in writes ?? []) q.Enqueue((RdpdrOp.Write, p));
+        var q = new Queue<RdpdrReq>();
+        foreach (var p in reads ?? []) q.Enqueue(new RdpdrReq { Op = RdpdrOp.Read, Path = p });
+        foreach (var p in lists ?? []) q.Enqueue(new RdpdrReq { Op = RdpdrOp.List, Path = p });
+        foreach (var p in writes ?? []) q.Enqueue(new RdpdrReq { Op = RdpdrOp.Write, Path = p });
         return q;
     }
 
@@ -270,13 +283,71 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     }
 
     private Desktop.FakeDesktop? _desktop;
+    private bool _desktopNeedsSend;   // set by an rdpdr callback; the serve loop resends
+    private bool _rdpdrKick;          // an on-demand rdpdr op was queued; start it after input
 
     /// <summary>Renders the fake Windows desktop and sends it as bitmap-update tiles.</summary>
     private async Task DrawDesktopAsync(CancellationToken ct)
     {
-        _desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight);
+        _desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight)
+        {
+            OnClientList = RequestClientList,
+            OnClientOpen = RequestClientOpen,
+        };
         await SendDesktopAsync(ct);
         log.LogInformation("Rendered fake desktop.");
+    }
+
+    /// <summary>The desktop's \\tsclient browser asks for a directory listing. The root lists the
+    /// redirected drives; deeper paths issue a live rdpdr LIST.</summary>
+    private void RequestClientList(int winId, string clientPath)
+    {
+        if (string.Equals(clientPath, @"\\tsclient", StringComparison.OrdinalIgnoreCase))
+        {
+            var drives = _rdpdrDrives.Keys.OrderBy(c => c).Select(c => (c.ToString(), true)).ToList();
+            _desktop?.DeliverClientList(winId, clientPath, drives);
+            return;
+        }
+        if (!TryTsClientToLocal(clientPath, out var local)) return;
+        _rdpdrOps.Enqueue(new RdpdrReq
+        {
+            Op = RdpdrOp.List,
+            Path = local,
+            Done = (entries, _) => { _desktop?.DeliverClientList(winId, clientPath, entries); _desktopNeedsSend = true; },
+        });
+        _rdpdrKick = true;
+    }
+
+    /// <summary>The desktop asks to open a client file: issue a live rdpdr READ and show it in Notepad.</summary>
+    private void RequestClientOpen(int winId, string clientPath)
+    {
+        if (!TryTsClientToLocal(clientPath, out var local)) return;
+        var name = clientPath.Split('\\', StringSplitOptions.RemoveEmptyEntries)[^1];
+        _rdpdrOps.Enqueue(new RdpdrReq
+        {
+            Op = RdpdrOp.Read,
+            Path = local,
+            Done = (_, bytes) => { _desktop?.DeliverClientOpen(name, DecodeText(bytes)); _desktopNeedsSend = true; },
+        });
+        _rdpdrKick = true;
+    }
+
+    /// <summary>Maps a <c>\\tsclient\C\rel</c> path to the local device path <c>C:\rel</c>.</summary>
+    private static bool TryTsClientToLocal(string tsPath, out string local)
+    {
+        local = "";
+        var segs = tsPath.Split('\\', StringSplitOptions.RemoveEmptyEntries); // ["tsclient","C","Users",...]
+        if (segs.Length < 2) return false;
+        char drive = char.ToUpperInvariant(segs[1][0]);
+        var rel = segs.Length > 2 ? "\\" + string.Join('\\', segs[2..]) : "\\";
+        local = $"{drive}:{rel}";
+        return true;
+    }
+
+    private static string DecodeText(byte[] bytes)
+    {
+        try { return System.Text.Encoding.UTF8.GetString(bytes); }
+        catch { return $"[{bytes.Length} bytes]"; }
     }
 
     private async Task SendDesktopAsync(CancellationToken ct)
@@ -318,6 +389,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 await HandleInputAsync(frame.Value.Header, frame.Value.Payload, ct);
             else
                 await HandleSlowPathAsync(frame.Value.Payload, ct);
+
+            // An rdpdr result (e.g. a \\tsclient listing) may have updated the desktop.
+            if (_desktopNeedsSend && _desktop is not null)
+            {
+                _desktopNeedsSend = false;
+                _desktop.Render();
+                await SendDesktopAsync(ct);
+            }
         }
     }
 
@@ -512,13 +591,21 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
     // ── Drive redirection (MS-RDPEFS / rdpdr) ───────────────────────────────
 
-    /// <summary>Starts the rdpdr init handshake if any read/list/write op is configured.</summary>
+    /// <summary>Starts the rdpdr init handshake if any op is configured, or the fake desktop is
+    /// on (so it can browse \\tsclient on demand).</summary>
     private async Task InitRdpdrAsync(CancellationToken ct)
     {
-        if (_rdpdrChannelId == 0 || _rdpdrOps.Count == 0) return;
+        if (_rdpdrChannelId == 0 || (_rdpdrOps.Count == 0 && _desktop is null)) return;
         await SendRdpdrAsync(Rdpdr.ServerAnnounceReq(1), ct);
-        log.LogInformation("rdpdr ready on {Channel}: sent Server Announce; {Count} client op(s) queued.",
-            _rdpdrChannelId, _rdpdrOps.Count);
+        log.LogInformation("rdpdr ready on {Channel}: sent Server Announce.", _rdpdrChannelId);
+    }
+
+    /// <summary>Enqueues an on-demand rdpdr op (used by the desktop's \\tsclient browser) and
+    /// starts it if the state machine is idle.</summary>
+    private async Task EnqueueRdpdrAsync(RdpdrReq req, CancellationToken ct)
+    {
+        _rdpdrOps.Enqueue(req);
+        if (_rdpdrPhase == RdpdrPhase.Idle) await StartNextRdpdrOpAsync(ct);
     }
 
     /// <summary>Drives the rdpdr init handshake, then reads the configured files from the client.</summary>
@@ -562,45 +649,49 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     {
         while (_rdpdrOps.Count > 0)
         {
-            var (op, clientPath) = _rdpdrOps.Dequeue();
+            var req = _rdpdrOps.Dequeue();
+            var clientPath = req.Path;
             if (clientPath.Length < 2 || clientPath[1] != ':')
             {
                 log.LogWarning("rdpdr: skipping non-drive path '{Path}'.", clientPath);
+                req.Done?.Invoke(new(), []);
                 continue;
             }
             char letter = char.ToUpperInvariant(clientPath[0]);
             if (!_rdpdrDrives.TryGetValue(letter, out var deviceId))
             {
-                log.LogWarning("rdpdr: drive {Letter}: not redirected; cannot {Op} '{Path}'.", letter, op, clientPath);
+                log.LogWarning("rdpdr: drive {Letter}: not redirected; cannot {Op} '{Path}'.", letter, req.Op, clientPath);
+                req.Done?.Invoke(new(), []);
                 continue;
             }
 
             var rel = clientPath[2..].Replace('/', '\\');
             rel = rel.Length == 0 ? "\\" : (rel.StartsWith('\\') ? rel : "\\" + rel);
 
-            _rdpdrOp = op;
+            _rdpdrCurrent = req;
             _rdpdrPath = clientPath;
             _rdpdrRel = rel;
             _rdpdrDeviceId = deviceId;
             _rdpdrFileId = 0;
             _rdpdrOffset = 0;
             _rdpdrBytes = 0;
-            _rdpdrNames.Clear();
-            _rdpdrHash = op == RdpdrOp.Read ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
+            _rdpdrEntries.Clear();
+            _rdpdrReadBytes.Clear();
+            _rdpdrHash = req.Op == RdpdrOp.Read ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
             _rdpdrPhase = RdpdrPhase.Create;
 
-            var create = op switch
+            var create = req.Op switch
             {
                 RdpdrOp.List  => Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel, Rdpdr.AccessList,  Rdpdr.DispositionOpen,        Rdpdr.OptionsDirectory),
                 RdpdrOp.Write => Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel, Rdpdr.AccessWrite, Rdpdr.DispositionOverwriteIf, Rdpdr.OptionsFile),
                 _             => Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel),
             };
             await SendRdpdrAsync(create, ct);
-            log.LogInformation("rdpdr: {Op} '{Path}' over the redirected drive.", op, clientPath);
+            log.LogInformation("rdpdr: {Op} '{Path}' over the redirected drive.", req.Op, clientPath);
             return;
         }
         _rdpdrPhase = RdpdrPhase.Idle;
-        log.LogInformation("rdpdr: all operations complete.");
+        _rdpdrCurrent = null;
     }
 
     private async Task HandleRdpdrCompletionAsync(byte[] pdu, CancellationToken ct)
@@ -612,6 +703,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 if (c.IoStatus != 0)
                 {
                     log.LogWarning("rdpdr: {Op} open of '{Path}' failed (status 0x{Status:X8}).", _rdpdrOp, _rdpdrPath, c.IoStatus);
+                    _rdpdrCurrent?.Done?.Invoke(new(), []);
                     await StartNextRdpdrOpAsync(ct);
                     return;
                 }
@@ -647,6 +739,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 if (data.Length > 0)
                 {
                     _rdpdrHash!.AppendData(data);
+                    if (_rdpdrReadBytes.Count < RdpdrReadCap) _rdpdrReadBytes.AddRange(data.ToArray());
                     _rdpdrBytes += data.Length;
                     _rdpdrOffset += (ulong)data.Length;
                 }
@@ -656,7 +749,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
             case RdpdrOp.List:
                 if (c.IoStatus == Rdpdr.StatusNoMoreFiles || c.IoStatus != 0) { await FinishRdpdrOpAsync(ct); return; }
-                _rdpdrNames.AddRange(Rdpdr.ParseDirEntries(Rdpdr.ReadData(c.Rest)));
+                _rdpdrEntries.AddRange(Rdpdr.ParseDirEntries(Rdpdr.ReadData(c.Rest)));
                 await SendRdpdrAsync(Rdpdr.QueryDirectoryRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, initial: false, ""), ct);
                 break;
 
@@ -680,12 +773,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 break;
             case RdpdrOp.List:
                 log.LogInformation("rdpdr: LIST '{Path}' -> {Count} entries: {Names}",
-                    _rdpdrPath, _rdpdrNames.Count, string.Join(", ", _rdpdrNames));
+                    _rdpdrPath, _rdpdrEntries.Count, string.Join(", ", _rdpdrEntries.Select(e => e.Name)));
                 break;
             case RdpdrOp.Write:
                 log.LogInformation("rdpdr: WROTE '{Path}' -> {Bytes} bytes.", _rdpdrPath, _rdpdrBytes);
                 break;
         }
+
+        _rdpdrCurrent?.Done?.Invoke(new List<(string, bool)>(_rdpdrEntries), _rdpdrReadBytes.ToArray());
         _rdpdrPhase = RdpdrPhase.Close;
         await SendRdpdrAsync(Rdpdr.CloseRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId), ct);
     }
@@ -714,8 +809,11 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         bool changed = false;
         foreach (var ev in events)
             changed |= _desktop.OnInput(ev);
-        if (!changed) return;
 
+        // An Explorer \\tsclient click may have queued an on-demand rdpdr op — start it.
+        if (_rdpdrKick) { _rdpdrKick = false; if (_rdpdrPhase == RdpdrPhase.Idle) await StartNextRdpdrOpAsync(ct); }
+
+        if (!changed) return;
         if (_desktop.IsDragging && _desktopClock.ElapsedMilliseconds < 33) return; // coalesce drag frames
         _desktopClock.Restart();
         _desktop.Render();          // render only when we actually send (not per move event)

@@ -196,22 +196,30 @@ public static class Rdpdr
         w.WriteUInt32LE(minor);
     }
 
-    /// <summary>File names from a directory-query response buffer (FILE_DIRECTORY_INFORMATION list).</summary>
-    public static List<string> ParseDirEntries(ReadOnlySpan<byte> buffer)
+    private const uint FileAttributeDirectory = 0x00000010;
+
+    /// <summary>Entries from a directory-query response buffer (FILE_DIRECTORY_INFORMATION list),
+    /// with the "." and ".." pseudo-entries dropped.</summary>
+    public static List<(string Name, bool IsDir)> ParseDirEntries(ReadOnlySpan<byte> buffer)
     {
-        var names = new List<string>();
+        var entries = new List<(string, bool)>();
         int pos = 0;
         while (pos + 64 <= buffer.Length)
         {
             uint next = BinaryPrimitives.ReadUInt32LittleEndian(buffer[pos..]);
+            uint attrs = BinaryPrimitives.ReadUInt32LittleEndian(buffer[(pos + 56)..]);
             uint nameLen = BinaryPrimitives.ReadUInt32LittleEndian(buffer[(pos + 60)..]);
             int nameStart = pos + 64;
             if (nameLen > 0 && nameStart + (int)nameLen <= buffer.Length)
-                names.Add(Encoding.Unicode.GetString(buffer.Slice(nameStart, (int)nameLen)));
+            {
+                string name = Encoding.Unicode.GetString(buffer.Slice(nameStart, (int)nameLen));
+                if (name != "." && name != "..")
+                    entries.Add((name, (attrs & FileAttributeDirectory) != 0));
+            }
             if (next == 0) break;
             pos += (int)next;
         }
-        return names;
+        return entries;
     }
 
     // ---- client -> server parsing -----------------------------------------
