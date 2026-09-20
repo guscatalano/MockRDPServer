@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
+using MockRdp.Rdp;
 
 namespace MockRdp.Server;
 
@@ -14,9 +15,14 @@ public sealed class RdpListener : IDisposable
     private readonly ILogger _log;
     private readonly string[]? _dvcChannels;
     private readonly string[]? _rdpdrReads;
+    private readonly Dictionary<string, Dvc.Behavior>? _dvcBehaviors;
+    private readonly string[]? _rdpdrLists;
+    private readonly string[]? _rdpdrWrites;
 
     public RdpListener(IPAddress address, int port, X509Certificate2 cert, ILoggerFactory loggerFactory,
-        string[]? dvcChannels = null, string[]? rdpdrReads = null)
+        string[]? dvcChannels = null, string[]? rdpdrReads = null,
+        Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
+        string[]? rdpdrLists = null, string[]? rdpdrWrites = null)
     {
         _listener = new TcpListener(address, port);
         _cert = cert;
@@ -24,6 +30,9 @@ public sealed class RdpListener : IDisposable
         _log = loggerFactory.CreateLogger("RdpListener");
         _dvcChannels = dvcChannels;
         _rdpdrReads = rdpdrReads;
+        _dvcBehaviors = dvcBehaviors;
+        _rdpdrLists = rdpdrLists;
+        _rdpdrWrites = rdpdrWrites;
     }
 
     /// <summary>The bound port. Valid after <see cref="Start"/> (useful when binding to port 0 in tests).</summary>
@@ -61,7 +70,8 @@ public sealed class RdpListener : IDisposable
         {
             using (client)
             {
-                var conn = new RdpConnection(client, _cert, log, _dvcChannels, _rdpdrReads);
+                var conn = new RdpConnection(client, _cert, log, _dvcChannels, _rdpdrReads, _dvcBehaviors,
+                    _rdpdrLists, _rdpdrWrites);
                 await conn.RunAsync(ct);
             }
         }

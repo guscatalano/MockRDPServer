@@ -33,6 +33,20 @@ public static class Rdpdr
     private const uint IrpMjCreate = 0x00000000;
     private const uint IrpMjClose  = 0x00000002;
     private const uint IrpMjRead   = 0x00000003;
+    private const uint IrpMjWrite  = 0x00000004;
+    private const uint IrpMjDirectoryControl = 0x0000000C;
+    private const uint IrpMnQueryDirectory   = 0x00000001;
+
+    public const uint StatusNoMoreFiles = 0x80000006;
+
+    // Common Windows access masks / options for create.
+    public const uint AccessRead  = 0x00120089; // FILE_GENERIC_READ
+    public const uint AccessWrite = 0x00120116; // FILE_GENERIC_WRITE
+    public const uint AccessList  = 0x00100001; // FILE_LIST_DIRECTORY | SYNCHRONIZE
+    public const uint DispositionOpen        = 0x00000001; // FILE_OPEN
+    public const uint DispositionOverwriteIf = 0x00000005; // FILE_OVERWRITE_IF
+    public const uint OptionsFile      = 0x00000060; // NON_DIRECTORY_FILE | SYNCHRONOUS_IO_NONALERT
+    public const uint OptionsDirectory = 0x00000021; // DIRECTORY_FILE | SYNCHRONOUS_IO_NONALERT
 
     public static ushort PacketId(ReadOnlySpan<byte> pdu) =>
         pdu.Length >= 4 ? BinaryPrimitives.ReadUInt16LittleEndian(pdu[2..]) : (ushort)0;
@@ -111,18 +125,19 @@ public static class Rdpdr
         return w.ToArray();
     }
 
-    public static byte[] CreateRequest(uint deviceId, uint completionId, string devicePath)
+    public static byte[] CreateRequest(uint deviceId, uint completionId, string devicePath,
+        uint desiredAccess = AccessRead, uint createDisposition = DispositionOpen, uint createOptions = OptionsFile)
     {
         var w = new ByteWriter();
         IoRequestHeader(w, deviceId, fileId: 0, completionId, IrpMjCreate);
-        w.WriteUInt32LE(0x00120089);   // DesiredAccess = FILE_GENERIC_READ
-        w.WriteUInt32LE(0); w.WriteUInt32LE(0); // AllocationSize (8)
-        w.WriteUInt32LE(0);            // FileAttributes
-        w.WriteUInt32LE(0x00000001);   // SharedAccess = FILE_SHARE_READ
-        w.WriteUInt32LE(0x00000001);   // CreateDisposition = FILE_OPEN
-        w.WriteUInt32LE(0x00000060);   // CreateOptions = NON_DIRECTORY_FILE | SYNCHRONOUS_IO_NONALERT
+        w.WriteUInt32LE(desiredAccess);
+        w.WriteUInt32LE(0); w.WriteUInt32LE(0);   // AllocationSize (8)
+        w.WriteUInt32LE(0);                        // FileAttributes
+        w.WriteUInt32LE(0x00000007);               // SharedAccess = READ | WRITE | DELETE
+        w.WriteUInt32LE(createDisposition);
+        w.WriteUInt32LE(createOptions);
         var path = Encoding.Unicode.GetBytes(devicePath + "\0");
-        w.WriteUInt32LE((uint)path.Length); // PathLength (includes null terminator)
+        w.WriteUInt32LE((uint)path.Length);        // PathLength (includes null terminator)
         w.WriteBytes(path);
         return w.ToArray();
     }
@@ -138,6 +153,31 @@ public static class Rdpdr
         return w.ToArray();
     }
 
+    public static byte[] WriteRequest(uint deviceId, uint fileId, uint completionId, ulong offset, ReadOnlySpan<byte> data)
+    {
+        var w = new ByteWriter();
+        IoRequestHeader(w, deviceId, fileId, completionId, IrpMjWrite);
+        w.WriteUInt32LE((uint)data.Length);
+        w.WriteUInt32LE((uint)(offset & 0xFFFFFFFF));
+        w.WriteUInt32LE((uint)(offset >> 32));
+        for (int i = 0; i < 20; i++) w.WriteUInt8(0); // Padding
+        w.WriteBytes(data);
+        return w.ToArray();
+    }
+
+    public static byte[] QueryDirectoryRequest(uint deviceId, uint fileId, uint completionId, bool initial, string pattern)
+    {
+        var w = new ByteWriter();
+        IoRequestHeader(w, deviceId, fileId, completionId, IrpMjDirectoryControl, IrpMnQueryDirectory);
+        w.WriteUInt32LE(1);                        // FsInformationClass = FileDirectoryInformation
+        w.WriteUInt8(initial ? (byte)1 : (byte)0); // InitialQuery
+        var path = initial ? Encoding.Unicode.GetBytes(pattern + "\0") : [];
+        w.WriteUInt32LE((uint)path.Length);        // PathLength
+        for (int i = 0; i < 23; i++) w.WriteUInt8(0); // Padding
+        w.WriteBytes(path);
+        return w.ToArray();
+    }
+
     public static byte[] CloseRequest(uint deviceId, uint fileId, uint completionId)
     {
         var w = new ByteWriter();
@@ -146,14 +186,32 @@ public static class Rdpdr
         return w.ToArray();
     }
 
-    private static void IoRequestHeader(ByteWriter w, uint deviceId, uint fileId, uint completionId, uint major)
+    private static void IoRequestHeader(ByteWriter w, uint deviceId, uint fileId, uint completionId, uint major, uint minor = 0)
     {
         Header(w, DeviceIoRequest);
         w.WriteUInt32LE(deviceId);
         w.WriteUInt32LE(fileId);
         w.WriteUInt32LE(completionId);
         w.WriteUInt32LE(major);
-        w.WriteUInt32LE(0);           // MinorFunction
+        w.WriteUInt32LE(minor);
+    }
+
+    /// <summary>File names from a directory-query response buffer (FILE_DIRECTORY_INFORMATION list).</summary>
+    public static List<string> ParseDirEntries(ReadOnlySpan<byte> buffer)
+    {
+        var names = new List<string>();
+        int pos = 0;
+        while (pos + 64 <= buffer.Length)
+        {
+            uint next = BinaryPrimitives.ReadUInt32LittleEndian(buffer[pos..]);
+            uint nameLen = BinaryPrimitives.ReadUInt32LittleEndian(buffer[(pos + 60)..]);
+            int nameStart = pos + 64;
+            if (nameLen > 0 && nameStart + (int)nameLen <= buffer.Length)
+                names.Add(Encoding.Unicode.GetString(buffer.Slice(nameStart, (int)nameLen)));
+            if (next == 0) break;
+            pos += (int)next;
+        }
+        return names;
     }
 
     // ---- client -> server parsing -----------------------------------------

@@ -1,5 +1,6 @@
 using System.Net;
 using Microsoft.Extensions.Logging;
+using MockRdp.Rdp;
 using MockRdp.Server;
 using MockRdp.Transport;
 
@@ -12,7 +13,17 @@ var bind = IPAddress.Any;
 string? certOut = null;
 string[]? dvcChannels = null;
 string[]? rdpdrReads = null;
+string[]? rdpdrLists = null;
+string[]? rdpdrWrites = null;
 string? logFile = null;
+var dvcReplies = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+var dvcFaults = new Dictionary<string, Dvc.Fault>(StringComparer.OrdinalIgnoreCase);
+
+static (string Channel, string Value) SplitEq(string arg)
+{
+    int eq = arg.IndexOf('=');
+    return eq < 0 ? (arg, "") : (arg[..eq], arg[(eq + 1)..]);
+}
 
 for (int i = 0; i < args.Length - 1; i++)
 {
@@ -24,6 +35,10 @@ for (int i = 0; i < args.Length - 1; i++)
         case "--log-file": logFile = args[++i]; break;
         case "--dvc": dvcChannels = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
         case "--rdpdr-read": rdpdrReads = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
+        case "--rdpdr-list": rdpdrLists = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
+        case "--rdpdr-write": rdpdrWrites = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
+        case "--dvc-reply":  { var (ch, v) = SplitEq(args[++i]); dvcReplies[ch] = File.ReadAllBytes(v); break; }
+        case "--dvc-fault":  { var (ch, v) = SplitEq(args[++i]); dvcFaults[ch] = Enum.Parse<Dvc.Fault>(v, ignoreCase: true); break; }
         case "--log-level":
             logLevel = args[++i].ToLowerInvariant() switch
             {
@@ -56,7 +71,20 @@ if (certOut is not null)
     File.WriteAllBytes(certOut, cert.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert));
     loggerFactory.CreateLogger("Program").LogInformation("Exported server certificate to {Path}", certOut);
 }
-using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads);
+Dictionary<string, Dvc.Behavior>? dvcBehaviors = null;
+if (dvcReplies.Count > 0 || dvcFaults.Count > 0)
+{
+    dvcBehaviors = new(StringComparer.OrdinalIgnoreCase);
+    foreach (var ch in dvcReplies.Keys.Union(dvcFaults.Keys))
+        dvcBehaviors[ch] = new Dvc.Behavior
+        {
+            Reply = dvcReplies.GetValueOrDefault(ch),
+            Fault = dvcFaults.GetValueOrDefault(ch),
+        };
+}
+
+using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
+    rdpdrLists, rdpdrWrites);
 listener.Start();
 
 using var cts = new CancellationTokenSource();

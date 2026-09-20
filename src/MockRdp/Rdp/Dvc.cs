@@ -30,6 +30,17 @@ public static class Dvc
     /// body: the create-response bytes, or the (fragment of) channel data.</summary>
     public readonly record struct Message(Cmd Cmd, uint ChannelId, int Version, int TotalLength, byte[] Data);
 
+    /// <summary>How a configured channel misbehaves, for exercising a client's DVC plugin.</summary>
+    public enum Fault { None, Fragment, Drop, Close, Truncate, Delay }
+
+    /// <summary>Per-channel behaviour override: a canned reply and/or an injected fault.
+    /// With neither, the channel echoes.</summary>
+    public sealed class Behavior
+    {
+        public byte[]? Reply { get; init; }
+        public Fault Fault { get; init; } = Fault.None;
+    }
+
     // Keep a DVC data PDU comfortably under the 1600-byte static-channel chunk limit.
     private const int MaxChunk = 1590;
 
@@ -81,11 +92,11 @@ public static class Dvc
 
     /// <summary>Frames channel data as one DYNVC_DATA, or DYNVC_DATA_FIRST + DYNVC_DATA
     /// fragments when it exceeds one chunk.</summary>
-    public static IReadOnlyList<byte[]> BuildData(uint channelId, ReadOnlySpan<byte> data)
+    public static IReadOnlyList<byte[]> BuildData(uint channelId, ReadOnlySpan<byte> data, int maxChunk = MaxChunk)
     {
         var pdus = new List<byte[]>();
 
-        if (data.Length <= MaxChunk)
+        if (data.Length <= maxChunk)
         {
             var w = new ByteWriter();
             w.WriteUInt8(Header(Cmd.Data, 0, CbId(channelId)));
@@ -101,13 +112,13 @@ public static class Dvc
         first.WriteUInt8(Header(Cmd.DataFirst, (byte)lenWidth, CbId(channelId)));
         WriteChannelId(first, channelId);
         WriteVarLen(first, lenWidth, data.Length);
-        int take = Math.Min(MaxChunk, data.Length);
+        int take = Math.Min(maxChunk, data.Length);
         first.WriteBytes(data[..take]);
         pdus.Add(first.ToArray());
 
         for (int off = take; off < data.Length; off += take)
         {
-            take = Math.Min(MaxChunk, data.Length - off);
+            take = Math.Min(maxChunk, data.Length - off);
             var w = new ByteWriter();
             w.WriteUInt8(Header(Cmd.Data, 0, CbId(channelId)));
             WriteChannelId(w, channelId);

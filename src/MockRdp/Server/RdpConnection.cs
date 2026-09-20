@@ -18,7 +18,9 @@ namespace MockRdp.Server;
 /// <see cref="RunAsync"/> past <see cref="ConnectionState.TlsUp"/>.
 /// </summary>
 public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log,
-    string[]? dvcChannels = null, string[]? rdpdrReads = null)
+    string[]? dvcChannels = null, string[]? rdpdrReads = null,
+    Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
+    string[]? rdpdrLists = null, string[]? rdpdrWrites = null)
 {
     private Stream _stream = tcp.GetStream();
     private ushort _cliprdrChannelId;
@@ -31,6 +33,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private readonly Dictionary<uint, string> _dvcOpen = new();       // id -> name (create confirmed)
     private readonly Dictionary<uint, string> _dvcPending = new();    // id -> name (create sent)
     private readonly Dictionary<uint, (int Total, ByteWriter Buf)> _dvcReasm = new();
+    private readonly Dictionary<string, Dvc.Behavior> _dvcBehaviors = dvcBehaviors ?? new();
     private uint _nextDvcId = 1;
 
     // Drive redirection (MS-RDPEFS over "rdpdr"). After the init handshake the mock reads
@@ -39,18 +42,32 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     // fit one static-channel PDU (no reassembly), and capped so a huge file doesn't stream.
     private const uint RdpdrReadChunk = 1000;
     private const long RdpdrReadCap = 64 * 1024;
+    private static readonly byte[] RdpdrMarker = "rdpeek-mock was here\r\n"u8.ToArray();
+    private enum RdpdrOp { Read, List, Write }
+    private enum RdpdrPhase { Idle, Create, Transfer, Close }
     private ushort _rdpdrChannelId;
-    private readonly Queue<string> _rdpdrReads = new(rdpdrReads ?? []);
+    private readonly Queue<(RdpdrOp Op, string Path)> _rdpdrOps = BuildRdpdrOps(rdpdrReads, rdpdrLists, rdpdrWrites);
     private readonly Dictionary<char, uint> _rdpdrDrives = new();     // drive letter -> device id
+    private readonly List<string> _rdpdrNames = new();                // accumulated dir entries
     private uint _rdpdrCompletionId;
-    private enum RdpdrIo { Idle, Create, Read, Close }
-    private RdpdrIo _rdpdrIo = RdpdrIo.Idle;
+    private RdpdrOp _rdpdrOp;
+    private RdpdrPhase _rdpdrPhase = RdpdrPhase.Idle;
     private string _rdpdrPath = "";
+    private string _rdpdrRel = "";
     private uint _rdpdrDeviceId;
     private uint _rdpdrFileId;
     private ulong _rdpdrOffset;
     private long _rdpdrBytes;
     private IncrementalHash? _rdpdrHash;
+
+    private static Queue<(RdpdrOp, string)> BuildRdpdrOps(string[]? reads, string[]? lists, string[]? writes)
+    {
+        var q = new Queue<(RdpdrOp, string)>();
+        foreach (var p in reads ?? []) q.Enqueue((RdpdrOp.Read, p));
+        foreach (var p in lists ?? []) q.Enqueue((RdpdrOp.List, p));
+        foreach (var p in writes ?? []) q.Enqueue((RdpdrOp.Write, p));
+        return q;
+    }
 
     public ConnectionState State { get; private set; } = ConnectionState.Initial;
 
@@ -404,9 +421,39 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             _dvcReasm.Remove(msg.ChannelId);
         }
 
-        log.LogInformation("DVC: '{Name}' (id {Id}) received {Count} bytes — echoing back.",
-            _dvcOpen[msg.ChannelId], msg.ChannelId, complete.Length);
-        foreach (var outPdu in Dvc.BuildData(msg.ChannelId, complete))
+        var name = _dvcOpen[msg.ChannelId];
+        var behavior = _dvcBehaviors.GetValueOrDefault(name);
+        var fault = behavior?.Fault ?? Dvc.Fault.None;
+
+        if (fault == Dvc.Fault.Drop)
+        {
+            log.LogInformation("DVC: '{Name}' (id {Id}) received {Count} bytes — DROPPING (fault).",
+                name, msg.ChannelId, complete.Length);
+            return;
+        }
+        if (fault == Dvc.Fault.Close)
+        {
+            log.LogInformation("DVC: '{Name}' (id {Id}) — CLOSING mid-stream (fault).", name, msg.ChannelId);
+            _dvcOpen.Remove(msg.ChannelId);
+            await SendDvcAsync(Dvc.BuildClose(msg.ChannelId), ct);
+            return;
+        }
+
+        var reply = behavior?.Reply ?? complete;                 // canned reply, else echo
+        if (fault == Dvc.Fault.Truncate && reply.Length > 1)
+            reply = reply[..(reply.Length / 2)];
+        if (fault == Dvc.Fault.Delay)
+            await Task.Delay(1500, ct);
+
+        string how = behavior?.Reply is not null ? "canned reply" : "echo";
+        if (fault != Dvc.Fault.None) how += $" +{fault}";
+        log.LogInformation("DVC: '{Name}' (id {Id}) received {Count} bytes — {How} ({Out} bytes).",
+            name, msg.ChannelId, complete.Length, how, reply.Length);
+
+        var pdus = fault == Dvc.Fault.Fragment
+            ? Dvc.BuildData(msg.ChannelId, reply, 4)   // force tiny fragments
+            : Dvc.BuildData(msg.ChannelId, reply);
+        foreach (var outPdu in pdus)
             await SendDvcAsync(outPdu, ct);
     }
 
@@ -415,13 +462,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
     // ── Drive redirection (MS-RDPEFS / rdpdr) ───────────────────────────────
 
-    /// <summary>Starts the rdpdr init handshake if there are client paths configured to read.</summary>
+    /// <summary>Starts the rdpdr init handshake if any read/list/write op is configured.</summary>
     private async Task InitRdpdrAsync(CancellationToken ct)
     {
-        if (_rdpdrChannelId == 0 || _rdpdrReads.Count == 0) return;
+        if (_rdpdrChannelId == 0 || _rdpdrOps.Count == 0) return;
         await SendRdpdrAsync(Rdpdr.ServerAnnounceReq(1), ct);
-        log.LogInformation("rdpdr ready on {Channel}: sent Server Announce; will read {Count} client path(s).",
-            _rdpdrChannelId, _rdpdrReads.Count);
+        log.LogInformation("rdpdr ready on {Channel}: sent Server Announce; {Count} client op(s) queued.",
+            _rdpdrChannelId, _rdpdrOps.Count);
     }
 
     /// <summary>Drives the rdpdr init handshake, then reads the configured files from the client.</summary>
@@ -450,9 +497,9 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                         log.LogInformation("rdpdr: client redirected drive {Dos} (device {Id}).", d.DosName, d.Id);
                     }
                 }
-                // Only begin reads once at least one filesystem drive is available (the client
+                // Only begin ops once at least one filesystem drive is available (the client
                 // may send an empty announce first, then the drives in a later one).
-                if (_rdpdrIo == RdpdrIo.Idle && fsAdded > 0) await StartNextRdpdrReadAsync(ct);
+                if (_rdpdrPhase == RdpdrPhase.Idle && fsAdded > 0) await StartNextRdpdrOpAsync(ct);
                 break;
 
             case Rdpdr.DeviceIoCompletion:
@@ -461,12 +508,12 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
     }
 
-    private async Task StartNextRdpdrReadAsync(CancellationToken ct)
+    private async Task StartNextRdpdrOpAsync(CancellationToken ct)
     {
-        while (_rdpdrReads.Count > 0)
+        while (_rdpdrOps.Count > 0)
         {
-            var clientPath = _rdpdrReads.Dequeue();
-            if (clientPath.Length < 3 || clientPath[1] != ':')
+            var (op, clientPath) = _rdpdrOps.Dequeue();
+            if (clientPath.Length < 2 || clientPath[1] != ':')
             {
                 log.LogWarning("rdpdr: skipping non-drive path '{Path}'.", clientPath);
                 continue;
@@ -474,46 +521,78 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             char letter = char.ToUpperInvariant(clientPath[0]);
             if (!_rdpdrDrives.TryGetValue(letter, out var deviceId))
             {
-                log.LogWarning("rdpdr: drive {Letter}: not redirected; cannot read '{Path}'.", letter, clientPath);
+                log.LogWarning("rdpdr: drive {Letter}: not redirected; cannot {Op} '{Path}'.", letter, op, clientPath);
                 continue;
             }
 
             var rel = clientPath[2..].Replace('/', '\\');
-            if (!rel.StartsWith('\\')) rel = "\\" + rel;
+            rel = rel.Length == 0 ? "\\" : (rel.StartsWith('\\') ? rel : "\\" + rel);
 
+            _rdpdrOp = op;
             _rdpdrPath = clientPath;
+            _rdpdrRel = rel;
             _rdpdrDeviceId = deviceId;
+            _rdpdrFileId = 0;
             _rdpdrOffset = 0;
             _rdpdrBytes = 0;
-            _rdpdrHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            _rdpdrIo = RdpdrIo.Create;
-            await SendRdpdrAsync(Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel), ct);
-            log.LogInformation("rdpdr: opening '{Path}' over the redirected drive.", clientPath);
+            _rdpdrNames.Clear();
+            _rdpdrHash = op == RdpdrOp.Read ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
+            _rdpdrPhase = RdpdrPhase.Create;
+
+            var create = op switch
+            {
+                RdpdrOp.List  => Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel, Rdpdr.AccessList,  Rdpdr.DispositionOpen,        Rdpdr.OptionsDirectory),
+                RdpdrOp.Write => Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel, Rdpdr.AccessWrite, Rdpdr.DispositionOverwriteIf, Rdpdr.OptionsFile),
+                _             => Rdpdr.CreateRequest(deviceId, ++_rdpdrCompletionId, rel),
+            };
+            await SendRdpdrAsync(create, ct);
+            log.LogInformation("rdpdr: {Op} '{Path}' over the redirected drive.", op, clientPath);
             return;
         }
-        _rdpdrIo = RdpdrIo.Idle;
-        log.LogInformation("rdpdr: all reads complete.");
+        _rdpdrPhase = RdpdrPhase.Idle;
+        log.LogInformation("rdpdr: all operations complete.");
     }
 
     private async Task HandleRdpdrCompletionAsync(byte[] pdu, CancellationToken ct)
     {
         var c = Rdpdr.ParseIoCompletion(pdu);
-        switch (_rdpdrIo)
+        switch (_rdpdrPhase)
         {
-            case RdpdrIo.Create:
+            case RdpdrPhase.Create:
                 if (c.IoStatus != 0)
                 {
-                    log.LogWarning("rdpdr: open of '{Path}' failed (status 0x{Status:X8}).", _rdpdrPath, c.IoStatus);
-                    await StartNextRdpdrReadAsync(ct);
+                    log.LogWarning("rdpdr: {Op} open of '{Path}' failed (status 0x{Status:X8}).", _rdpdrOp, _rdpdrPath, c.IoStatus);
+                    await StartNextRdpdrOpAsync(ct);
                     return;
                 }
                 _rdpdrFileId = Rdpdr.CreateFileId(c.Rest);
-                _rdpdrIo = RdpdrIo.Read;
-                await SendReadAsync(ct);
+                _rdpdrPhase = RdpdrPhase.Transfer;
+                await StartTransferAsync(ct);
                 break;
 
-            case RdpdrIo.Read:
-                if (c.IoStatus != 0) { await FinishRdpdrReadAsync(ct); return; } // e.g. STATUS_END_OF_FILE
+            case RdpdrPhase.Transfer:
+                await ContinueTransferAsync(c, ct);
+                break;
+
+            case RdpdrPhase.Close:
+                await StartNextRdpdrOpAsync(ct);
+                break;
+        }
+    }
+
+    private Task StartTransferAsync(CancellationToken ct) => _rdpdrOp switch
+    {
+        RdpdrOp.List  => SendRdpdrAsync(Rdpdr.QueryDirectoryRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, initial: true, (_rdpdrRel.EndsWith('\\') ? _rdpdrRel : _rdpdrRel + "\\") + "*"), ct),
+        RdpdrOp.Write => SendRdpdrAsync(Rdpdr.WriteRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, 0, RdpdrMarker), ct),
+        _             => SendRdpdrAsync(Rdpdr.ReadRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, RdpdrReadChunk, _rdpdrOffset), ct),
+    };
+
+    private async Task ContinueTransferAsync(Rdpdr.Completion c, CancellationToken ct)
+    {
+        switch (_rdpdrOp)
+        {
+            case RdpdrOp.Read:
+                if (c.IoStatus != 0) { await FinishRdpdrOpAsync(ct); return; } // e.g. STATUS_END_OF_FILE
                 var data = Rdpdr.ReadData(c.Rest);
                 if (data.Length > 0)
                 {
@@ -521,28 +600,43 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     _rdpdrBytes += data.Length;
                     _rdpdrOffset += (ulong)data.Length;
                 }
-                if (data.Length < RdpdrReadChunk || _rdpdrBytes >= RdpdrReadCap)
-                    await FinishRdpdrReadAsync(ct);
-                else
-                    await SendReadAsync(ct);
+                if (data.Length < RdpdrReadChunk || _rdpdrBytes >= RdpdrReadCap) await FinishRdpdrOpAsync(ct);
+                else await SendRdpdrAsync(Rdpdr.ReadRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, RdpdrReadChunk, _rdpdrOffset), ct);
                 break;
 
-            case RdpdrIo.Close:
-                await StartNextRdpdrReadAsync(ct);
+            case RdpdrOp.List:
+                if (c.IoStatus == Rdpdr.StatusNoMoreFiles || c.IoStatus != 0) { await FinishRdpdrOpAsync(ct); return; }
+                _rdpdrNames.AddRange(Rdpdr.ParseDirEntries(Rdpdr.ReadData(c.Rest)));
+                await SendRdpdrAsync(Rdpdr.QueryDirectoryRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, initial: false, ""), ct);
+                break;
+
+            case RdpdrOp.Write:
+                if (c.IoStatus != 0) log.LogWarning("rdpdr: WRITE '{Path}' failed (status 0x{Status:X8}).", _rdpdrPath, c.IoStatus);
+                else _rdpdrBytes = RdpdrMarker.Length;
+                await FinishRdpdrOpAsync(ct);
                 break;
         }
     }
 
-    private Task SendReadAsync(CancellationToken ct) =>
-        SendRdpdrAsync(Rdpdr.ReadRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId, RdpdrReadChunk, _rdpdrOffset), ct);
-
-    private async Task FinishRdpdrReadAsync(CancellationToken ct)
+    private async Task FinishRdpdrOpAsync(CancellationToken ct)
     {
-        var hash = _rdpdrHash is not null ? Convert.ToHexString(_rdpdrHash.GetHashAndReset()).ToLowerInvariant() : "";
-        bool capped = _rdpdrBytes >= RdpdrReadCap;
-        log.LogInformation("rdpdr: READ '{Path}' -> {Bytes} bytes{Capped}, sha256={Hash}",
-            _rdpdrPath, _rdpdrBytes, capped ? " (capped)" : "", hash);
-        _rdpdrIo = RdpdrIo.Close;
+        switch (_rdpdrOp)
+        {
+            case RdpdrOp.Read:
+                var hash = _rdpdrHash is not null ? Convert.ToHexString(_rdpdrHash.GetHashAndReset()).ToLowerInvariant() : "";
+                bool capped = _rdpdrBytes >= RdpdrReadCap;
+                log.LogInformation("rdpdr: READ '{Path}' -> {Bytes} bytes{Capped}, sha256={Hash}",
+                    _rdpdrPath, _rdpdrBytes, capped ? " (capped)" : "", hash);
+                break;
+            case RdpdrOp.List:
+                log.LogInformation("rdpdr: LIST '{Path}' -> {Count} entries: {Names}",
+                    _rdpdrPath, _rdpdrNames.Count, string.Join(", ", _rdpdrNames));
+                break;
+            case RdpdrOp.Write:
+                log.LogInformation("rdpdr: WROTE '{Path}' -> {Bytes} bytes.", _rdpdrPath, _rdpdrBytes);
+                break;
+        }
+        _rdpdrPhase = RdpdrPhase.Close;
         await SendRdpdrAsync(Rdpdr.CloseRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId), ct);
     }
 

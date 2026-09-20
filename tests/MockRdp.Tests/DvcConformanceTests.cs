@@ -71,4 +71,63 @@ public class DvcConformanceTests
         Assert.Equal(Dvc.Cmd.Create, create.Cmd);
         Assert.Equal("dvc::diag::inspector", Dvc.ChannelName(create));
     }
+
+    [Fact]
+    public async Task Dvc_CannedReply_OverridesEcho()
+    {
+        var reply = Encoding.ASCII.GetBytes("canned-answer");
+        var behaviors = new Dictionary<string, Dvc.Behavior> { ["ECHO"] = new Dvc.Behavior { Reply = reply } };
+        using var server = new MockServerFixture(["ECHO"], behaviors);
+        await using var client = new RdpTestClient();
+        var ct = Timeout;
+
+        var (channelId, user) = await OpenEchoChannelAsync(client, server, ct);
+
+        foreach (var pdu in Dvc.BuildData(channelId, Encoding.ASCII.GetBytes("anything")))
+            await McsClient.SendDvcAsync(client, user, DvcChannel, pdu, ct);
+
+        var got = Dvc.Parse(await McsClient.ReadDvcAsync(client, DvcChannel, ct));
+        Assert.Equal(Dvc.Cmd.Data, got.Cmd);
+        Assert.Equal(reply, got.Data);
+    }
+
+    [Fact]
+    public async Task Dvc_FragmentFault_SplitsReply()
+    {
+        var behaviors = new Dictionary<string, Dvc.Behavior> { ["ECHO"] = new Dvc.Behavior { Fault = Dvc.Fault.Fragment } };
+        using var server = new MockServerFixture(["ECHO"], behaviors);
+        await using var client = new RdpTestClient();
+        var ct = Timeout;
+
+        var (channelId, user) = await OpenEchoChannelAsync(client, server, ct);
+
+        var payload = Encoding.ASCII.GetBytes("fragment me please");
+        foreach (var pdu in Dvc.BuildData(channelId, payload))
+            await McsClient.SendDvcAsync(client, user, DvcChannel, pdu, ct);
+
+        // Fault=Fragment forces DATA_FIRST + DATA; reassemble and compare.
+        var first = Dvc.Parse(await McsClient.ReadDvcAsync(client, DvcChannel, ct));
+        Assert.Equal(Dvc.Cmd.DataFirst, first.Cmd);
+        var buf = new List<byte>(first.Data);
+        while (buf.Count < first.TotalLength)
+        {
+            var next = Dvc.Parse(await McsClient.ReadDvcAsync(client, DvcChannel, ct));
+            Assert.Equal(Dvc.Cmd.Data, next.Cmd);
+            buf.AddRange(next.Data);
+        }
+        Assert.Equal(payload, buf.ToArray());
+    }
+
+    /// <summary>Negotiates, activates, and opens the ECHO channel; returns (channelId, user).</summary>
+    private static async Task<(uint ChannelId, ushort User)> OpenEchoChannelAsync(
+        RdpTestClient client, MockServerFixture server, CancellationToken ct)
+    {
+        ushort user = await McsClient.NegotiateThroughChannelJoinAsync(client, server.Endpoint, Channels, ct);
+        await McsClient.ActivateAsync(client, user, ct);
+        Assert.Equal(Dvc.Cmd.Capabilities, Dvc.Parse(await McsClient.ReadDvcAsync(client, DvcChannel, ct)).Cmd);
+        await McsClient.SendDvcAsync(client, user, DvcChannel, Dvc.BuildCapabilities(1), ct);
+        var create = Dvc.Parse(await McsClient.ReadDvcAsync(client, DvcChannel, ct));
+        await McsClient.SendDvcAsync(client, user, DvcChannel, Dvc.BuildCreateResponse(create.ChannelId, 0), ct);
+        return (create.ChannelId, user);
+    }
 }

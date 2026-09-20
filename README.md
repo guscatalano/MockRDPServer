@@ -17,7 +17,7 @@ and **FreeRDP**. Built incrementally, milestone by milestone; see
 | M5 | Keyboard/mouse input | ✅ done |
 | M6 | Clipboard virtual channel (CLIPRDR) | ✅ done |
 | M7 | Dynamic virtual channels (DRDYNVC / MS-RDPEDYC) | ✅ done |
-| M8 | Drive redirection read-back (rdpdr / MS-RDPEFS) | ✅ done |
+| M8 | Drive redirection read/list/write (rdpdr / MS-RDPEFS) + scripted/fault DVCs | ✅ done |
 
 All originally planned milestones are complete: a real RDP client connects end-to-end,
 sees rendered graphics, drives the screen with keyboard/mouse, and exchanges clipboard
@@ -60,11 +60,20 @@ dotnet run --project src/MockRdp -- --port 3389 --log-level trace
 dotnet run --project src/MockRdp -- --dvc "dvc::diag::inspector"   # open a specific DVC
 ```
 
-Server flags: `--port <n>` (default 3389), `--bind <ip>`, `--log-level trace|debug|info|warn|error`,
-`--dvc <name[,name...]>` (dynamic virtual channels to open; default `ECHO`),
-`--rdpdr-read <clientPath[,clientPath...]>` (read files back from the client's redirected
-drives over `rdpdr`/`\\tsclient`, logging bytes + sha256 — e.g. verify what an installer
-redirects; reads are capped per file).
+Server flags: `--port <n>` (default 3389), `--bind <ip>`, `--log-level trace|debug|info|warn|error`.
+
+Dynamic virtual channels (`drdynvc`):
+- `--dvc <name[,name...]>` — channels to open (default `ECHO`; each echoes by default).
+- `--dvc-reply <channel>=<file>` — reply with a file's bytes instead of echoing (feed a
+  recorded response so a client plugin gets a valid answer).
+- `--dvc-fault <channel>=<fragment|drop|close|truncate|delay>` — inject a fault to exercise
+  a client plugin's resilience.
+
+Drive redirection (`rdpdr` / `\\tsclient`), each takes client paths:
+- `--rdpdr-read <path[,...]>` — read files back from the client, logging bytes + sha256
+  (capped per file).
+- `--rdpdr-list <dir[,...]>` — enumerate a redirected directory.
+- `--rdpdr-write <path[,...]>` — write a small marker file to the client.
 
 ## CI & prebuilt binary
 
