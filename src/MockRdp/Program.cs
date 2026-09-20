@@ -25,6 +25,10 @@ int ssIdx = Array.IndexOf(args, "--screenshot");
 if (ssIdx >= 0 && ssIdx + 1 < args.Length)
 {
     using var shot = new MockRdp.Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight);
+    if (args.Contains("--secure")) shot.Active = MockRdp.Desktop.DesktopKind.Secure;
+    if (args.Contains("--start-menu")) shot.StartMenuOpen = true;
+    if (args.Contains("--no-window")) shot.WindowOpen = false;
+    shot.Render();
     shot.SavePng(args[ssIdx + 1]);
     Console.WriteLine($"Wrote desktop screenshot to {args[ssIdx + 1]}");
     return;

@@ -1,3 +1,4 @@
+using MockRdp.Rdp;
 using SixLabors.Fonts;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Drawing;
@@ -7,19 +8,33 @@ using SixLabors.ImageSharp.Processing;
 
 namespace MockRdp.Desktop;
 
+/// <summary>Which desktop within the (fake) window station is active — mirroring Windows'
+/// Default (interactive) vs. Winlogon (secure) desktops.</summary>
+public enum DesktopKind { Default, Secure }
+
 /// <summary>
-/// A software-rendered fake Windows desktop. Phase 0: composes a static scene (wallpaper,
-/// a window, a taskbar with a Start button and clock) into an ImageSharp framebuffer that
-/// the RDP output path sends as bitmap-update tiles. Managed-only (no native deps).
+/// A software-rendered fake Windows session. Owns a framebuffer and the state of the
+/// interactive desktop (Start menu, a window) and the secure/Winlogon desktop, switches
+/// between them, and turns client input into state changes. Phase 1: cursor is the client's
+/// own; input drives clicks (Start menu, window close) and the Secure Attention Sequence
+/// (Ctrl+Alt+End) flips to the secure desktop; Esc returns.
 /// </summary>
 public sealed class FakeDesktop : IDisposable
 {
     public int Width { get; }
     public int Height { get; }
+    public DesktopKind Active { get; set; } = DesktopKind.Default;
+    public bool StartMenuOpen { get; set; }
+    public bool WindowOpen { get; set; } = true;
 
     private readonly Image<Rgba32> _fb;
     private readonly Font? _font;
-    private readonly Font? _fontSmall;
+    private readonly Font? _small;
+    private bool _ctrl, _alt;
+
+    private const int Taskbar = 44;
+    private static readonly int[] Win = [130, 90, 480, 320]; // x, y, w, h
+    private const int StartW = 92;
 
     public FakeDesktop(int width, int height)
     {
@@ -27,7 +42,7 @@ public sealed class FakeDesktop : IDisposable
         Height = height;
         _fb = new Image<Rgba32>(width, height);
         _font = TryLoadFont(15);
-        _fontSmall = TryLoadFont(12);
+        _small = TryLoadFont(12);
         Render();
     }
 
@@ -39,38 +54,128 @@ public sealed class FakeDesktop : IDisposable
         return SystemFonts.Families.Any() ? SystemFonts.Families.First().CreateFont(size, FontStyle.Regular) : null;
     }
 
-    /// <summary>Composes the whole desktop into the framebuffer.</summary>
+    // ── input ───────────────────────────────────────────────────────────────
+
+    /// <summary>Applies one client input event. Returns true if the framebuffer changed.</summary>
+    public bool OnInput(InputEvent ev)
+    {
+        switch (ev.Type)
+        {
+            case InputEventType.Scancode: return OnKey(ev.Code, (ev.Flags & 0x01) != 0);
+            case InputEventType.Mouse:
+                bool leftDown = (ev.Flags & Input.PtrFlagsDown) != 0 && (ev.Flags & Input.PtrFlagsButton1) != 0;
+                return leftDown && OnClick(ev.X, ev.Y);
+            default: return false;
+        }
+    }
+
+    private bool OnKey(byte scancode, bool release)
+    {
+        switch (scancode)
+        {
+            case 0x1D: _ctrl = !release; return false;                 // Ctrl
+            case 0x38: _alt = !release; return false;                  // Alt
+            case 0x4F when !release && _ctrl && _alt:                  // End -> SAS
+                return Switch(DesktopKind.Secure);
+            case 0x01 when !release:                                    // Esc
+                if (Active == DesktopKind.Secure) return Switch(DesktopKind.Default);
+                if (StartMenuOpen) { StartMenuOpen = false; Render(); return true; }
+                return false;
+            default: return false;
+        }
+    }
+
+    private bool OnClick(int x, int y)
+    {
+        if (Active == DesktopKind.Secure)
+            return InRect(x, y, CancelBtn()) && Switch(DesktopKind.Default);
+
+        int tbY = Height - Taskbar;
+        if (InRect(x, y, 0, tbY, StartW, Taskbar)) { StartMenuOpen = !StartMenuOpen; Render(); return true; }
+        if (StartMenuOpen) { StartMenuOpen = false; Render(); return true; } // any click dismisses (items are Phase 2)
+        if (WindowOpen && InRect(x, y, Win[0] + Win[2] - 30, Win[1], 30, 30)) { WindowOpen = false; Render(); return true; }
+        return false;
+    }
+
+    private bool Switch(DesktopKind kind)
+    {
+        if (Active == kind) return false;
+        Active = kind;
+        StartMenuOpen = false;
+        Render();
+        return true;
+    }
+
+    // ── rendering ─────────────────────────────────────────────────────────────
+
     public void Render()
     {
-        const int taskbar = 44;
-        int tbY = Height - taskbar;
-
         _fb.Mutate(ctx =>
         {
-            // Wallpaper: vertical blue gradient.
-            ctx.Fill(new LinearGradientBrush(
-                new PointF(0, 0), new PointF(0, Height), GradientRepetitionMode.None,
-                new ColorStop(0f, Color.ParseHex("103A6B")),
-                new ColorStop(1f, Color.ParseHex("2B6AB0"))));
-
-            DrawWindow(ctx, "Welcome to mock-rdp", 130, 90, 480, 320);
-
-            // Taskbar + Start button + clock.
-            Fill(ctx, "1F1F1F", 0, tbY, Width, taskbar);
-            Fill(ctx, "0A7A3A", 0, tbY, 92, taskbar);
-            Text(ctx, _font, "Start", 20, tbY + 12, Color.White);
-            Text(ctx, _fontSmall, DateTime.Now.ToString("h:mm tt"), Width - 74, tbY + 15, Color.White);
+            if (Active == DesktopKind.Secure) RenderSecure(ctx);
+            else RenderDefault(ctx);
         });
     }
 
-    private void DrawWindow(IImageProcessingContext ctx, string title, int x, int y, int w, int h)
+    private void RenderDefault(IImageProcessingContext ctx)
     {
-        Fill(ctx, "F2F2F2", x, y, w, h);            // body
-        Fill(ctx, "005A9E", x, y, w, 30);           // title bar
-        Text(ctx, _font, title, x + 10, y + 7, Color.White);
-        Fill(ctx, "C23030", x + w - 30, y, 30, 30); // close button
-        Text(ctx, _font, "x", x + w - 19, y + 6, Color.White);
-        Text(ctx, _fontSmall, "This is a software-rendered fake Windows desktop.", x + 14, y + 50, Color.ParseHex("202020"));
+        int tbY = Height - Taskbar;
+        ctx.Fill(new LinearGradientBrush(new PointF(0, 0), new PointF(0, Height), GradientRepetitionMode.None,
+            new ColorStop(0f, Color.ParseHex("103A6B")), new ColorStop(1f, Color.ParseHex("2B6AB0"))));
+
+        if (WindowOpen)
+        {
+            Fill(ctx, "F2F2F2", Win[0], Win[1], Win[2], Win[3]);
+            Fill(ctx, "005A9E", Win[0], Win[1], Win[2], 30);
+            Text(ctx, _font, "Welcome to mock-rdp", Win[0] + 10, Win[1] + 7, Color.White);
+            Fill(ctx, "C23030", Win[0] + Win[2] - 30, Win[1], 30, 30);
+            Text(ctx, _font, "x", Win[0] + Win[2] - 19, Win[1] + 6, Color.White);
+            Text(ctx, _small, "Click Start, close this window, or press Ctrl+Alt+End.", Win[0] + 14, Win[1] + 50, Color.ParseHex("202020"));
+        }
+
+        if (StartMenuOpen)
+        {
+            int mh = 220, my = tbY - mh;
+            Fill(ctx, "2A2A2A", 0, my, 240, mh);
+            string[] items = ["File Explorer", "Notepad", "Settings", "Run…"];
+            for (int i = 0; i < items.Length; i++)
+                Text(ctx, _font, items[i], 18, my + 18 + i * 34, Color.White);
+        }
+
+        Fill(ctx, "1F1F1F", 0, tbY, Width, Taskbar);
+        Fill(ctx, StartMenuOpen ? "0E9F4E" : "0A7A3A", 0, tbY, StartW, Taskbar);
+        Text(ctx, _font, "Start", 20, tbY + 12, Color.White);
+        Text(ctx, _small, DateTime.Now.ToString("h:mm tt"), Width - 74, tbY + 15, Color.White);
+    }
+
+    private void RenderSecure(IImageProcessingContext ctx)
+    {
+        ctx.Fill(Color.ParseHex("0A0A14")); // dimmed secure background
+        var (dx, dy, dw, dh) = Dialog();
+        Fill(ctx, "1B1B2A", dx, dy, dw, dh);
+        Fill(ctx, "3A3A55", dx, dy, dw, 34);
+        Text(ctx, _font, "Windows Security", dx + 14, dy + 9, Color.White);
+        Text(ctx, _small, "Secure desktop (Winlogon).", dx + 20, dy + 58, Color.ParseHex("D0D0D0"));
+        Text(ctx, _small, "Apps on the interactive desktop cannot see or drive this.", dx + 20, dy + 82, Color.ParseHex("D0D0D0"));
+        string[] opts = ["Lock", "Sign out", "Task Manager"];
+        for (int i = 0; i < opts.Length; i++)
+            Text(ctx, _small, "•  " + opts[i], dx + 24, dy + 116 + i * 24, Color.ParseHex("A8C8FF"));
+        var c = CancelBtn();
+        Fill(ctx, "3A3A55", c[0], c[1], c[2], c[3]);
+        Text(ctx, _small, "Cancel", c[0] + 22, c[1] + 8, Color.White);
+        Text(ctx, _small, "Press Esc or Cancel to return.", dx + 20, dy + dh - 26, Color.ParseHex("808080"));
+    }
+
+    private (int X, int Y, int W, int H) Dialog()
+    {
+        int dw = 440, dh = 250;
+        return ((Width - dw) / 2, (Height - dh) / 2, dw, dh);
+    }
+
+    private int[] CancelBtn()
+    {
+        var (dx, dy, dw, dh) = Dialog();
+        return [dx + dw - 110, dy + dh - 44, 90, 30];
     }
 
     private static void Fill(IImageProcessingContext ctx, string hex, int x, int y, int w, int h) =>
@@ -81,9 +186,15 @@ public sealed class FakeDesktop : IDisposable
         if (font is not null) ctx.DrawText(s, font, color, new PointF(x, y));
     }
 
+    private static bool InRect(int px, int py, int x, int y, int w, int h) =>
+        px >= x && px < x + w && py >= y && py < y + h;
+
+    private static bool InRect(int px, int py, int[] r) => InRect(px, py, r[0], r[1], r[2], r[3]);
+
+    // ── output ────────────────────────────────────────────────────────────────
+
     public void SavePng(string path) => _fb.SaveAsPng(path);
 
-    /// <summary>The framebuffer as RGB565 tiles for RDP bitmap updates.</summary>
     public IEnumerable<(int X, int Y, int W, int H, ushort[] Pixels)> Tiles(int tile = 64)
     {
         var buf = new Rgba32[Width * Height];

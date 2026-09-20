@@ -75,11 +75,13 @@ Drive redirection (`rdpdr` / `\\tsclient`), each takes client paths:
 - `--rdpdr-list <dir[,...]>` — enumerate a redirected directory.
 - `--rdpdr-write <path[,...]>` — write a small marker file to the client.
 
-Fake desktop (experimental — a software-rendered Windows-like session):
-- `--desktop` — render a fake desktop (wallpaper, a window, taskbar + Start + clock) as
-  bitmap updates instead of the colour test pattern.
-- `--screenshot <path.png>` — render one desktop frame to a PNG and exit (no server), for
-  quick visual verification.
+Fake desktop (experimental — a software-rendered, interactive Windows-like session):
+- `--desktop` — render a fake desktop instead of the colour test pattern, and respond to
+  input: click **Start** to toggle the Start menu, click a window's **×** to close it, and
+  press **Ctrl+Alt+End** (the remote secure-attention sequence) to switch to the **secure /
+  Winlogon desktop**; **Esc** returns. Mirrors Windows' Default vs. Secure desktops.
+- `--screenshot <path.png> [--secure] [--start-menu] [--no-window]` — render one frame of a
+  chosen state to a PNG and exit (no server), for quick visual verification.
 
 ## CI & prebuilt binary
 

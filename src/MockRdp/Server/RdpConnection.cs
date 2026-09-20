@@ -269,17 +269,21 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("Sent startup test pattern ({Count} bitmap updates).", Graphics.TestPattern().Count);
     }
 
+    private Desktop.FakeDesktop? _desktop;
+
     /// <summary>Renders the fake Windows desktop and sends it as bitmap-update tiles.</summary>
     private async Task DrawDesktopAsync(CancellationToken ct)
     {
-        using var desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight);
-        int tiles = 0;
-        foreach (var (x, y, w, h, pixels) in desktop.Tiles())
-        {
+        _desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight);
+        await SendDesktopAsync(ct);
+        log.LogInformation("Rendered fake desktop.");
+    }
+
+    private async Task SendDesktopAsync(CancellationToken ct)
+    {
+        if (_desktop is null) return;
+        foreach (var (x, y, w, h, pixels) in _desktop.Tiles())
             await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels)), ct);
-            tiles++;
-        }
-        log.LogInformation("Rendered fake desktop ({Tiles} tiles).", tiles);
     }
 
     /// <summary>M5: keeps the active session alive, reacting to client input.</summary>
@@ -660,8 +664,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     /// <summary>Decodes fast-path input and draws a marker where the mouse moves/clicks.</summary>
     private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)
     {
+        bool changed = false;
         foreach (var ev in Input.ParseFastPath(fastPathHeader, payload))
         {
+            if (_desktop is not null)
+            {
+                changed |= _desktop.OnInput(ev);
+                continue;
+            }
             switch (ev.Type)
             {
                 case InputEventType.Mouse:
@@ -674,6 +684,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     log.LogDebug("Key: unicode U+{Code:X4}.", ev.X);
                     break;
             }
+        }
+
+        if (changed && _desktop is not null)
+        {
+            await SendDesktopAsync(ct);
+            log.LogInformation("Desktop: active={Active} startMenu={Menu} window={Window}.",
+                _desktop.Active, _desktop.StartMenuOpen, _desktop.WindowOpen);
         }
     }
 
