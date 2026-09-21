@@ -699,6 +699,24 @@ public sealed class FakeDesktop : IDisposable
             Row("..", "E8C24A");
             if (w.ClientEntries is not null)
                 foreach (var (name, isDir) in w.ClientEntries) Row(name, isDir ? "E8C24A" : "B7B7B7");
+
+            // At the \\tsclient root with nothing to show, say so plainly rather than looking empty.
+            bool atRoot = string.Equals(w.ClientPath, TsClient, StringComparison.OrdinalIgnoreCase);
+            if (atRoot && (w.ClientEntries is null || w.ClientEntries.Count == 0))
+            {
+                int ny = listTop + RowH + 10;
+                Text(ctx, _small, "No redirected drives available.", w.X + 16, ny, Color.ParseHex("B03030"));
+                foreach (var msg in new[]
+                {
+                    "Drive redirection is one-way: your RDP client shares its drives",
+                    "with this server. Enable \"Drives\" in the client and reconnect.",
+                    "(mstsc also withholds drives from an untrusted / self-signed server.)",
+                })
+                {
+                    ny += 18;
+                    Text(ctx, _small, msg, w.X + 16, ny, Color.ParseHex("606060"));
+                }
+            }
         }
         else if (w.Folder is not null)
         {

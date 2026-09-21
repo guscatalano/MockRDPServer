@@ -68,6 +68,14 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
         shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 590)); // Start → Display
     }
+    if (args.Contains("--tsclient"))
+    {
+        // Simulate browsing \\tsclient with no redirected drives (delivers an empty listing).
+        shot.OnClientList = (winId, path) => shot.DeliverClientList(winId, path, new List<(string, bool)>());
+        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 484)); // Start → File Explorer
+        shot.OnInput(Click(210, 196));                              // click the \\tsclient row (top)
+    }
     if (args.Contains("--dvcmon"))
     {
         shot.DvcTraffic = () =>
