@@ -47,14 +47,14 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
             ("Redirected drives", "C:, D:"),
         ];
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 590)); // Start → Connection Info
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 555)); // Start → Connection Info
     }
     if (args.Contains("--scroll"))
     {
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
         InputEvent Move(ushort x, ushort y) => new(InputEventType.Mouse, Input.PtrFlagsMove, x, y, 0);
         InputEvent Up(ushort x, ushort y) => new(InputEventType.Mouse, Input.PtrFlagsButton1, x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 520));  // Start → File Explorer
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 484));  // Start → File Explorer
         shot.OnInput(Click(250, 226)); shot.OnInput(Click(250, 226)); // .. → Users → C:
         shot.OnInput(Click(250, 248)); shot.OnInput(Click(250, 248)); // Windows → System32 (overflows)
         if (!args.Contains("--top"))
@@ -66,7 +66,25 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
     if (args.Contains("--display"))
     {
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 625)); // Start → Display
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 590)); // Start → Display
+    }
+    if (args.Contains("--dvcmon"))
+    {
+        shot.DvcTraffic = () =>
+        [
+            "20:31:04 → drdynvc · 12B · server capabilities v1",
+            "20:31:04 ← drdynvc · 12B · client capabilities v3",
+            "20:31:04 → ECHO · 11B · create request (id 1)",
+            "20:31:04 ← ECHO · 10B · create OK (id 1)",
+            "20:31:04 → DisplayControl · 45B · create request (id 2)",
+            "20:31:04 ← DisplayControl · 10B · create OK (id 2)",
+            "20:31:04 → DisplayControl · 20B · caps PDU",
+            "20:31:18 ← DisplayControl · 56B · monitor layout 1280×800",
+            "20:31:22 ← ECHO · 13B · data",
+            "20:31:22 → ECHO · 13B · echo",
+        ];
+        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 625)); // Start → DVC Monitor
     }
     if (args.Contains("--demo"))
     {

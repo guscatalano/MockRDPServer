@@ -49,6 +49,15 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private readonly Dictionary<uint, string> _dvcOpen = new();       // id -> name (create confirmed)
     private readonly Dictionary<uint, string> _dvcPending = new();    // id -> name (create sent)
     private readonly Dictionary<uint, (int Total, ByteWriter Buf)> _dvcReasm = new();
+    private readonly List<string> _dvcLog = new();                   // live feed for the DVC Monitor window
+
+    // Records one line of dynamic-virtual-channel traffic for the desktop's DVC Monitor.
+    // dir: "←" inbound (client -> server), "→" outbound (server -> client).
+    private void LogDvc(string dir, string channel, int bytes, string note)
+    {
+        _dvcLog.Add($"{DateTime.Now:HH:mm:ss} {dir} {channel} · {bytes}B · {note}");
+        if (_dvcLog.Count > 300) _dvcLog.RemoveRange(0, _dvcLog.Count - 300);
+    }
     private readonly Dictionary<string, Dvc.Behavior> _dvcBehaviors = dvcBehaviors ?? new();
     private uint _nextDvcId = 1;
 
@@ -327,6 +336,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             OnClientList = RequestClientList,
             OnClientOpen = RequestClientOpen,
             ConnectionStats = BuildConnectionStats,
+            DvcTraffic = () => _dvcLog.ToArray(),
         };
         log.LogInformation("Fake desktop booting to {Boot} (NLA requested: {Nla}).",
             showLogon ? "logon screen" : "desktop", _nlaRequested);
@@ -604,9 +614,15 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task InitDvcAsync(CancellationToken ct)
     {
         if (_drdynvcChannelId == 0) return;
-        await SendDvcAsync(Dvc.BuildCapabilitiesV1(), ct);
+        var caps = Dvc.BuildCapabilitiesV1();
+        await SendDvcAsync(caps, ct);
+        LogDvc("→", "drdynvc", caps.Length, "server capabilities v1");
         log.LogInformation("DVC (drdynvc) ready on {Channel}: sent capabilities v1.", _drdynvcChannelId);
     }
+
+    // Friendly channel label for the DVC Monitor (the Display Control name is very long).
+    private static string DvcLabel(string name) =>
+        name == DisplayControl.ChannelName ? "DisplayControl" : name;
 
     /// <summary>Handles one inbound DRDYNVC PDU: capabilities response, create response,
     /// channel data (echoed back), or close.</summary>
@@ -617,6 +633,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         {
             case Dvc.Cmd.Capabilities:
                 _dvcVersion = msg.Version;
+                LogDvc("←", "drdynvc", pdu.Length, $"client capabilities v{msg.Version}");
                 log.LogInformation("DVC: client capabilities (version {Version}); opening {Count} channel(s).",
                     msg.Version, _dvcChannelNames.Length);
                 foreach (var name in _dvcChannelNames)
@@ -630,6 +647,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             case Dvc.Cmd.Create: // inbound Create is a create RESPONSE
                 var name0 = _dvcPending.Remove(msg.ChannelId, out var pending) ? pending : $"#{msg.ChannelId}";
                 int status = Dvc.CreationStatus(msg);
+                LogDvc("←", DvcLabel(name0), pdu.Length, status == 0 ? $"create OK (id {msg.ChannelId})" : $"create rejected 0x{(uint)status:X8}");
                 if (status == 0)
                 {
                     _dvcOpen[msg.ChannelId] = name0;
@@ -637,8 +655,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     if (name0 == DisplayControl.ChannelName)
                     {
                         _displayControlId = msg.ChannelId;
-                        foreach (var p in Dvc.BuildData(msg.ChannelId, DisplayControl.BuildCapsPdu()))
+                        var caps = DisplayControl.BuildCapsPdu();
+                        foreach (var p in Dvc.BuildData(msg.ChannelId, caps))
                             await SendDvcAsync(p, ct);
+                        LogDvc("→", "DisplayControl", caps.Length, "caps PDU");
                         log.LogInformation("Display Control ready on DVC id {Id}: sent caps.", msg.ChannelId);
                     }
                 }
@@ -656,7 +676,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
             case Dvc.Cmd.Close:
                 if (_dvcOpen.Remove(msg.ChannelId, out var closed))
+                {
+                    LogDvc("←", DvcLabel(closed), pdu.Length, "close");
                     log.LogInformation("DVC: client closed channel '{Name}' (id {Id}).", closed, msg.ChannelId);
+                }
                 _dvcReasm.Remove(msg.ChannelId);
                 break;
         }
@@ -666,7 +689,9 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     {
         uint id = _nextDvcId++;
         _dvcPending[id] = name;
-        await SendDvcAsync(Dvc.BuildCreateRequest(id, name), ct);
+        var req = Dvc.BuildCreateRequest(id, name);
+        await SendDvcAsync(req, ct);
+        LogDvc("→", DvcLabel(name), req.Length, $"create request (id {id})");
         log.LogInformation("DVC: create request for '{Name}' (id {Id}).", name, id);
     }
 
@@ -701,6 +726,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         if (msg.ChannelId == _displayControlId)
         {
             var size = DisplayControl.ParseMonitorLayout(complete);
+            LogDvc("←", "DisplayControl", complete.Length,
+                size is { } sz ? $"monitor layout {sz.Width}×{sz.Height}" : "monitor layout");
             if (size is { } s && (s.Width != _width || s.Height != _height))
             {
                 _pendingResize = s;
@@ -710,6 +737,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
 
         var name = _dvcOpen[msg.ChannelId];
+        LogDvc("←", DvcLabel(name), complete.Length, "data");
         var behavior = _dvcBehaviors.GetValueOrDefault(name);
         var fault = behavior?.Fault ?? Dvc.Fault.None;
 
@@ -743,6 +771,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             : Dvc.BuildData(msg.ChannelId, reply);
         foreach (var outPdu in pdus)
             await SendDvcAsync(outPdu, ct);
+        LogDvc("→", DvcLabel(name), reply.Length, how + (pdus.Count > 1 ? $" ({pdus.Count} fragments)" : ""));
     }
 
     private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>

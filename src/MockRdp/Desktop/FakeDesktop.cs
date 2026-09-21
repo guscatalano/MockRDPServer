@@ -29,7 +29,7 @@ public sealed class FakeDesktop : IDisposable
     public string FocusedText => Focused?.Body ?? "";
     public bool IsDragging => _drag is not null;
 
-    private enum WinKind { Generic, Explorer, Notepad, Run, Stats, Display }
+    private enum WinKind { Generic, Explorer, Notepad, Run, Stats, Display, DvcMon }
 
     private sealed class Win
     {
@@ -58,9 +58,13 @@ public sealed class FakeDesktop : IDisposable
     /// describing the RDP connection (state, channels, redirected drives, …).</summary>
     public Func<IReadOnlyList<(string Label, string Value)>>? ConnectionStats;
 
-    /// <summary>True while a Connection Info window is open, so the host can tick faster and keep
-    /// the live stats (uptime, DVC state) fresh.</summary>
-    public bool WantsLiveTick => _windows.Any(w => w.Kind == WinKind.Stats);
+    /// <summary>Feeds the DVC Monitor window: the most recent dynamic-virtual-channel traffic lines
+    /// (newest last), each already formatted for display.</summary>
+    public Func<IReadOnlyList<string>>? DvcTraffic;
+
+    /// <summary>True while a live window (Connection Info / DVC Monitor) is open, so the host ticks
+    /// faster and keeps its contents fresh.</summary>
+    public bool WantsLiveTick => _windows.Any(w => w.Kind is WinKind.Stats or WinKind.DvcMon);
 
     /// <summary>A resolution the user picked in Display settings. The host reads and clears it and
     /// applies it as a server-initiated Deactivation-Reactivation (no client MONITOR_LAYOUT).</summary>
@@ -94,7 +98,7 @@ public sealed class FakeDesktop : IDisposable
     private const int TitleH = 30;
     private const int CloseW = 30;
     private const int StartW = 92;
-    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "Settings", "Run…"];
+    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "DVC Monitor", "Settings", "Run…"];
     private const int MenuW = 240;
     private const int MenuRow = 36;
 
@@ -465,6 +469,7 @@ public sealed class FakeDesktop : IDisposable
             case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
             case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 560, H = 440 }); break;
             case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
+            case "DVC Monitor": Open(new Win { Kind = WinKind.DvcMon, Title = "DVC Monitor — live channel traffic", W = 600, H = 380 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
         }
@@ -564,6 +569,7 @@ public sealed class FakeDesktop : IDisposable
             case WinKind.Run: DrawRun(ctx, w, focused); break;
             case WinKind.Stats: DrawStats(ctx, w); break;
             case WinKind.Display: DrawDisplay(ctx, w); break;
+            case WinKind.DvcMon: DrawDvcMon(ctx, w); break;
             default:
             {
                 int ly = w.Y + TitleH + 18;
@@ -612,6 +618,32 @@ public sealed class FakeDesktop : IDisposable
             Fill(ctx, current ? "0E639C" : "EDEDED", w.X + 12, ry, w.W - 24, DisplayRowH - 6);
             Text(ctx, _small, $"{rw} × {rh}" + (current ? "   (current)" : ""),
                 w.X + 24, ry + 6, current ? Color.White : Color.ParseHex("101010"));
+        }
+    }
+
+    private void DrawDvcMon(IImageProcessingContext ctx, Win w)
+    {
+        // Dark, terminal-like panel with a live feed of drdynvc traffic.
+        Fill(ctx, "12141A", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
+        var lines = DvcTraffic?.Invoke();
+        int top = w.Y + TitleH + 14, lineH = 17;
+        int rows = Math.Max(1, (w.H - TitleH - 24) / lineH);
+        if (lines is null || lines.Count == 0)
+        {
+            Text(ctx, _small, "Waiting for dynamic virtual channel traffic…", w.X + 14, top, Color.ParseHex("7A8290"));
+            Text(ctx, _small, "(resize the window or change resolution to see PDUs flow)", w.X + 14, top + lineH, Color.ParseHex("50565F"));
+            return;
+        }
+        int start = Math.Max(0, lines.Count - rows);   // show the most recent lines
+        int yy = top;
+        for (int i = start; i < lines.Count; i++)
+        {
+            var line = lines[i];
+            var color = line.Contains(" ← ") ? Color.ParseHex("7FD7A0")   // inbound (client → server)
+                      : line.Contains(" → ") ? Color.ParseHex("6FB7E8")   // outbound (server → client)
+                      : Color.ParseHex("C8CDD4");
+            Text(ctx, _small, line, w.X + 14, yy, color);
+            yy += lineH;
         }
     }
 
