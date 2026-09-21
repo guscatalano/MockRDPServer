@@ -18,6 +18,7 @@ public static class Finalization
     public const byte Pdu2FontList = 39;
     public const byte Pdu2FontMap = 40;
     public const byte Pdu2SaveSessionInfo = 38;
+    public const byte Pdu2ShutdownRequest = 36;   // PDUTYPE2_SHUTDOWN_REQUEST (client asks to log off)
 
     private const uint InfoTypeLogon = 0x00000000;   // INFOTYPE_LOGON -> TS_LOGON_INFO
 
