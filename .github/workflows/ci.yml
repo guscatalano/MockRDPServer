@@ -29,6 +29,38 @@ jobs:
       - name: Test
         run: dotnet test MockRdp.slnx -c Release --no-build --verbosity normal
 
+  real-clients:
+    name: Real clients vs. the mock (FreeRDP + mstscax)
+    runs-on: windows-latest
+    needs: build-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install FreeRDP (wfreerdp)
+        shell: pwsh
+        run: choco install -y --no-progress freerdp.portable
+
+      # Tier 2, client #1: FreeRDP (headless CLI). run-checkpoint.ps1 builds + starts the mock,
+      # drives wfreerdp against it, and asserts the connection reached the ACTIVE stage.
+      - name: FreeRDP checkpoint → ACTIVE
+        shell: pwsh
+        run: ./scripts/run-checkpoint.ps1 -Port 33461 -ExpectStage active -TimeoutSec 25
+
+      # Tier 2, client #2: the mstscax ActiveX control — the same protocol/rendering engine that
+      # mstsc.exe hosts. (Real mstsc.exe is a GUI with no scriptable success signal, so it can't be
+      # asserted on a headless runner; the control is the automatable, mstsc-grade equivalent.)
+      # It hosts the control, connects over TLS auto-accepting the self-signed cert, and exits 0
+      # only if the session reaches ACTIVE.
+      - name: mstscax checkpoint (mstsc's engine) → full session
+        shell: pwsh
+        run: ./tools/RdpAxClient/test-against-mock.ps1 -Port 33462 -TimeoutSec 30
+
   publish:
     name: Publish mock server (win-x64)
     runs-on: windows-latest
