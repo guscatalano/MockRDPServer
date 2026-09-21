@@ -68,20 +68,101 @@ internal sealed class FileBrowserWindow : Form
 
         _tree.AfterSelect += (_, e) => ShowNode(e.Node?.Tag as VfsNode);
         Load();
+
+        // Auto-refresh: when the window regains focus, and on a poll if the tree changed (e.g. a
+        // pasted file) — both re-read the live shared VFS without disturbing expansion/selection.
+        _sig = Signature(_root);
+        Activated += (_, _) => RefreshIfChanged();
+        _poll.Tick += (_, _) => RefreshIfChanged();
+        _poll.Start();
+        FormClosed += (_, _) => _poll.Stop();
+    }
+
+    private readonly System.Windows.Forms.Timer _poll = new() { Interval = 1000 };
+    private int _sig;
+
+    private void RefreshIfChanged()
+    {
+        if (IsDisposed) return;
+        int sig = Signature(_root);
+        if (sig == _sig) return;
+        _sig = sig;
+        Load();
     }
 
     private void Load()
     {
+        // Preserve what the user has open/selected across a reload.
+        var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        CollectExpanded(_tree.Nodes, expanded);
+        var selectedPath = _tree.SelectedNode?.FullPath;
+        bool first = _tree.Nodes.Count == 0;
+
         _tree.BeginUpdate();
         _tree.Nodes.Clear();
-        var rootNode = BuildNode(_root);   // the live shared tree — Refresh re-reads it after a paste
+        var rootNode = BuildNode(_root);   // the live shared tree — re-read after a paste
         _tree.Nodes.Add(rootNode);
-        rootNode.Expand();
-        // Expand the user's home for convenience.
-        foreach (TreeNode n in rootNode.Nodes)
-            if (n.Text == "Users") { n.Expand(); foreach (TreeNode u in n.Nodes) u.Expand(); }
+
+        if (first)
+        {
+            rootNode.Expand();
+            foreach (TreeNode n in rootNode.Nodes)
+                if (n.Text == "Users") { n.Expand(); foreach (TreeNode u in n.Nodes) u.Expand(); }
+        }
+        else
+        {
+            RestoreExpanded(_tree.Nodes, expanded);
+            if (!rootNode.IsExpanded) rootNode.Expand();
+        }
         _tree.EndUpdate();
-        _tree.SelectedNode = rootNode;
+
+        var pick = selectedPath is null ? null : FindByPath(_tree.Nodes, selectedPath);
+        _tree.SelectedNode = pick ?? rootNode;
+        ShowNode((_tree.SelectedNode?.Tag) as VfsNode);
+    }
+
+    private static void CollectExpanded(TreeNodeCollection nodes, HashSet<string> into)
+    {
+        foreach (TreeNode n in nodes)
+        {
+            if (n.IsExpanded) into.Add(n.FullPath);
+            CollectExpanded(n.Nodes, into);
+        }
+    }
+
+    private static void RestoreExpanded(TreeNodeCollection nodes, HashSet<string> expanded)
+    {
+        foreach (TreeNode n in nodes)
+        {
+            if (expanded.Contains(n.FullPath)) n.Expand();
+            RestoreExpanded(n.Nodes, expanded);
+        }
+    }
+
+    private static TreeNode? FindByPath(TreeNodeCollection nodes, string path)
+    {
+        foreach (TreeNode n in nodes)
+        {
+            if (string.Equals(n.FullPath, path, StringComparison.OrdinalIgnoreCase)) return n;
+            if (FindByPath(n.Nodes, path) is { } hit) return hit;
+        }
+        return null;
+    }
+
+    /// <summary>A content signature of the tree (names, dir/file, file text) so a paste or edit is
+    /// detected cheaply on the poll timer.</summary>
+    private static int Signature(VfsNode root)
+    {
+        var hc = new HashCode();
+        void Walk(VfsNode x)
+        {
+            hc.Add(x.Name);
+            hc.Add(x.IsDir);
+            if (!x.IsDir) hc.Add(x.Text);
+            foreach (var c in x.Children) Walk(c);
+        }
+        Walk(root);
+        return hc.ToHashCode();
     }
 
     private static TreeNode BuildNode(VfsNode v)
