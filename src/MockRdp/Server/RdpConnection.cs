@@ -24,6 +24,12 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 {
     private bool _nlaRequested;
     private Stream _stream = tcp.GetStream();
+
+    // Snapshot state surfaced by the desktop's "Connection Info" window.
+    private readonly DateTime _connectedAt = DateTime.Now;
+    private IReadOnlyList<string> _requestedChannels = [];
+    private string _clientUser = "";
+    private string _clientDomain = "";
     private ushort _cliprdrChannelId;
     private bool _offeredServerClipboard;
 
@@ -160,6 +166,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
         var userData = McsPdu.ReadConnectInitialUserData(Cotp.StripDataTpdu(initialPacket));
         var channels = Gcc.ReadRequestedChannels(userData);
+        _requestedChannels = channels;
         int channelCount = channels.Count;
         int clipIndex = channels.FindIndex(n => string.Equals(n, "cliprdr", StringComparison.OrdinalIgnoreCase));
         _cliprdrChannelId = clipIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + clipIndex) : (ushort)0;
@@ -208,6 +215,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     log.LogInformation("MCS complete: {Joined} channels joined; Client Info received.", joined);
                     var (_, clientInfo) = McsPdu.ParseSendData(mcs);
                     var info = ClientInfo.Parse(clientInfo);
+                    _clientUser = info.User;
+                    _clientDomain = info.Domain;
                     log.LogInformation("Client Info: user='{User}' domain='{Domain}' altShell='{Shell}' workDir='{Dir}'.",
                         info.User, info.Domain, info.AlternateShell, info.WorkingDir);
                     await RunActivationAsync(userChannelId, ct);
@@ -299,11 +308,39 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         {
             OnClientList = RequestClientList,
             OnClientOpen = RequestClientOpen,
+            ConnectionStats = BuildConnectionStats,
         };
         log.LogInformation("Fake desktop booting to {Boot} (NLA requested: {Nla}).",
             showLogon ? "logon screen" : "desktop", _nlaRequested);
         await SendDesktopAsync(ct);
         log.LogInformation("Rendered fake desktop.");
+    }
+
+    /// <summary>Live rows for the desktop's "Connection Info" window: what a real RDP session would
+    /// expose about itself — state, security, the joined static channels, the open dynamic virtual
+    /// channels, and the client's redirected drives.</summary>
+    private IReadOnlyList<(string Label, string Value)> BuildConnectionStats()
+    {
+        static string Join<T>(IEnumerable<T> items, string empty) =>
+            items.Any() ? string.Join(", ", items) : empty;
+
+        var who = string.IsNullOrEmpty(_clientDomain) ? _clientUser : $@"{_clientDomain}\{_clientUser}";
+        var up = DateTime.Now - _connectedAt;
+
+        string dvcs = _dvcOpen.Count > 0
+            ? Join(_dvcOpen.OrderBy(o => o.Key).Select(o => $"{o.Value} #{o.Key}"), "")
+            : Join(_dvcPending.OrderBy(o => o.Key).Select(o => $"{o.Value} #{o.Key} (pending)"), "none open");
+
+        return
+        [
+            ("State", State.ToString()),
+            ("Security", _nlaRequested ? "TLS + NLA requested" : "TLS (no NLA)"),
+            ("Client user", string.IsNullOrEmpty(who) ? "(none)" : who),
+            ("Uptime", $"{(int)up.TotalMinutes:00}:{up.Seconds:00}"),
+            ("Static channels", Join(_requestedChannels, "(none)")),
+            ("Dynamic channels", dvcs),
+            ("Redirected drives", Join(_rdpdrDrives.Keys.OrderBy(c => c).Select(c => $"{c}:"), "(none yet)")),
+        ];
     }
 
     /// <summary>The desktop's \\tsclient browser asks for a directory listing. The root lists the
@@ -380,7 +417,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         while (!ct.IsCancellationRequested)
         {
             pending ??= ReadFrameAsync(ct);
-            var completed = await Task.WhenAny(pending, Task.Delay(TimeSpan.FromSeconds(20), ct));
+            // Tick faster while the Connection Info window is open so its live stats stay fresh;
+            // dirty-rect rendering keeps each idle tick to just the changed tiles.
+            var tick = _desktop?.WantsLiveTick == true ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(20);
+            var completed = await Task.WhenAny(pending, Task.Delay(tick, ct));
             if (ct.IsCancellationRequested) return;
 
             if (completed != pending)

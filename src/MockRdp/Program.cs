@@ -28,6 +28,21 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
     using var shot = new MockRdp.Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight, args.Contains("--logon"));
     if (args.Contains("--secure")) shot.Active = MockRdp.Desktop.DesktopKind.Secure;
     if (args.Contains("--start-menu")) shot.StartMenuOpen = true;
+    if (args.Contains("--stats"))
+    {
+        shot.ConnectionStats = () =>
+        [
+            ("State", "Active"),
+            ("Security", "TLS (no NLA)"),
+            ("Client user", @"MOCK\rdpuser"),
+            ("Uptime", "03:12"),
+            ("Static channels", "rdpdr, rdpsnd, cliprdr, drdynvc"),
+            ("Dynamic channels", "ECHO #1"),
+            ("Redirected drives", "C:, D:"),
+        ];
+        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 625)); // Start → Connection Info
+    }
     if (args.Contains("--demo"))
     {
         // Synthetic clicks: open File Explorer, browse into Documents, open readme.txt in Notepad.

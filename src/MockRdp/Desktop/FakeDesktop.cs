@@ -29,7 +29,7 @@ public sealed class FakeDesktop : IDisposable
     public string FocusedText => Focused?.Body ?? "";
     public bool IsDragging => _drag is not null;
 
-    private enum WinKind { Generic, Explorer, Notepad, Run }
+    private enum WinKind { Generic, Explorer, Notepad, Run, Stats }
 
     private sealed class Win
     {
@@ -54,6 +54,14 @@ public sealed class FakeDesktop : IDisposable
     public Action<int, string>? OnClientList;
     public Action<int, string>? OnClientOpen;
 
+    /// <summary>Set by the host to feed the "Connection Info" window: live (label, value) rows
+    /// describing the RDP connection (state, channels, redirected drives, …).</summary>
+    public Func<IReadOnlyList<(string Label, string Value)>>? ConnectionStats;
+
+    /// <summary>True while a Connection Info window is open, so the host can tick faster and keep
+    /// the live stats (uptime, DVC state) fresh.</summary>
+    public bool WantsLiveTick => _windows.Any(w => w.Kind == WinKind.Stats);
+
     private const string TsClient = "\\\\tsclient";
 
     private readonly List<Win> _windows = new();   // z-order: last = topmost
@@ -76,7 +84,7 @@ public sealed class FakeDesktop : IDisposable
     private const int TitleH = 30;
     private const int CloseW = 30;
     private const int StartW = 92;
-    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Settings", "Run…"];
+    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Settings", "Run…"];
     private const int MenuW = 240;
     private const int MenuRow = 36;
 
@@ -369,6 +377,7 @@ public sealed class FakeDesktop : IDisposable
         {
             case "File Explorer": Open(new Win { Kind = WinKind.Explorer, Title = "File Explorer", Folder = _vfsHome, W = 480, H = 320 }); break;
             case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
+            case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 470, H = 300 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
         }
@@ -465,11 +474,31 @@ public sealed class FakeDesktop : IDisposable
             case WinKind.Explorer: DrawExplorer(ctx, w); break;
             case WinKind.Notepad: DrawNotepad(ctx, w, focused); break;
             case WinKind.Run: DrawRun(ctx, w, focused); break;
+            case WinKind.Stats: DrawStats(ctx, w); break;
             default: Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020")); break;
         }
 
         // Black window border (drawn last so it sits on top of the content).
         ctx.Draw(Color.Black, 2f, new RectangularPolygon(w.X, w.Y, w.W, w.H));
+    }
+
+    private void DrawStats(IImageProcessingContext ctx, Win w)
+    {
+        Fill(ctx, "FFFFFF", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
+        var rows = ConnectionStats?.Invoke();
+        if (rows is null || rows.Count == 0)
+        {
+            Text(ctx, _small, "No connection data.", w.X + 16, w.Y + TitleH + 16, Color.ParseHex("808080"));
+            return;
+        }
+        int yy = w.Y + TitleH + 16;
+        int labelX = w.X + 16, valueX = w.X + 160;
+        foreach (var (label, value) in rows)
+        {
+            Text(ctx, _small, label, labelX, yy, Color.ParseHex("606060"));
+            Text(ctx, _small, value, valueX, yy, Color.ParseHex("101010"));
+            yy += 28;
+        }
     }
 
     private void DrawRun(IImageProcessingContext ctx, Win w, bool focused)

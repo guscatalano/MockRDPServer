@@ -76,7 +76,7 @@ public class DesktopInputTests
         Assert.Equal(1, d.WindowCount);
 
         d.OnInput(LeftClick(10, 748));               // open Start menu
-        Assert.True(d.OnInput(LeftClick(20, 724 - 160 + 10))); // click the first menu item
+        Assert.True(d.OnInput(LeftClick(20, 555)));  // click the first menu item (File Explorer)
         Assert.Equal(2, d.WindowCount);              // a window launched
 
         // Drag the launched window by its title bar (press → move → release).
@@ -90,7 +90,7 @@ public class DesktopInputTests
     {
         using var d = new FakeDesktop(1024, 768);
         d.OnInput(LeftClick(10, 748));               // Start
-        d.OnInput(LeftClick(20, 574));               // File Explorer (opens at the user's home)
+        d.OnInput(LeftClick(20, 555));               // File Explorer (opens at the user's home)
         Assert.Equal(2, d.WindowCount);
 
         // Rows now: \\tsclient(196), ..(218), Documents(240) — click Documents, then readme.txt.
@@ -101,10 +101,27 @@ public class DesktopInputTests
     }
 
     [Fact]
+    public void StartMenu_OpensConnectionInfo_AndRequestsLiveTick()
+    {
+        using var d = new FakeDesktop(1024, 768)
+        {
+            ConnectionStats = () => [("State", "Active"), ("Dynamic channels", "ECHO #1")],
+        };
+        Assert.False(d.WantsLiveTick);
+
+        d.OnInput(LeftClick(10, 748));               // Start
+        d.OnInput(LeftClick(20, 625));               // Connection Info (3rd item)
+
+        Assert.Equal(2, d.WindowCount);
+        Assert.Equal("Connection Info", d.FocusedTitle);
+        Assert.True(d.WantsLiveTick);                // host now ticks faster
+    }
+
+    [Fact]
     public void Keyboard_TypesIntoNotepad()
     {
         using var d = new FakeDesktop(1024, 768);
-        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 620)); // Start → Notepad
+        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 590)); // Start → Notepad
         Type(d, "hi");
         Assert.Equal("hi", d.FocusedText);
     }
@@ -113,7 +130,7 @@ public class DesktopInputTests
     public void Run_TypeProgramName_Launches()
     {
         using var d = new FakeDesktop(1024, 768);
-        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 690)); // Start → Run…
+        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 700)); // Start → Run…
         Type(d, "notepad");
         d.OnInput(Key(0x1C));                         // Enter
         Assert.Contains("Notepad", d.FocusedTitle);   // Run launched Notepad
