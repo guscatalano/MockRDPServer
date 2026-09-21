@@ -96,8 +96,42 @@ public class DesktopInputTests
         // Rows now: \\tsclient(196), ..(218), Documents(240) — click Documents, then readme.txt.
         d.OnInput(LeftClick(250, 250));              // navigate into Documents (a folder → no new window)
         Assert.Equal(2, d.WindowCount);
-        d.OnInput(LeftClick(250, 250));              // open readme.txt (a file → Notepad opens)
+        d.OnInput(LeftClick(250, 250));              // single-click readme.txt → selects it (no window)
+        Assert.Equal(2, d.WindowCount);
+        d.OnInput(LeftClick(250, 250));              // double-click readme.txt → Notepad opens
         Assert.Equal(3, d.WindowCount);
+    }
+
+    [Fact]
+    public void Explorer_SelectFile_CtrlC_QueuesFileCopy()
+    {
+        using var d = new FakeDesktop(1024, 768);
+        d.OnInput(LeftClick(10, 748));               // Start
+        d.OnInput(LeftClick(20, 448));               // File Explorer (home)
+        d.OnInput(LeftClick(250, 250));              // into Documents
+        d.OnInput(LeftClick(250, 250));              // single-click readme.txt → selects (no window)
+        Assert.Equal(2, d.WindowCount);
+
+        d.OnInput(Key(0x1D));                        // Ctrl down
+        d.OnInput(Key(0x2E));                        // 'C' → copy the selected file
+        var copy = d.TakeClipboardCopy();
+        Assert.NotNull(copy);
+        Assert.Equal("readme.txt", copy!.Value.Name);
+        Assert.True(copy.Value.Bytes.Length > 0);
+        Assert.Null(d.TakeClipboardCopy());          // drained (one-shot)
+    }
+
+    [Fact]
+    public void Desktop_CtrlV_RequestsPaste_AndDeliverOpensFile()
+    {
+        using var d = new FakeDesktop(1024, 768);
+        d.OnInput(Key(0x1D));                        // Ctrl down
+        d.OnInput(Key(0x2F));                        // 'V' → paste request
+        Assert.True(d.TakeClipboardPasteRequest());
+        Assert.False(d.TakeClipboardPasteRequest()); // one-shot
+
+        d.DeliverClientFile("dropped.txt", System.Text.Encoding.UTF8.GetBytes("from the client"));
+        Assert.Contains("dropped.txt", d.OpenWindowTitles[^1]);   // opened in Notepad, front-most
     }
 
     [Fact]

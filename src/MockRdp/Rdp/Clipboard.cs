@@ -30,6 +30,7 @@ public static class Clipboard
 
     // CLIPRDR_FILECONTENTS_REQUEST.dwFlags.
     private const uint FileContentsSize = 0x00000001;
+    private const uint FileContentsRange = 0x00000002;
 
     // FILEDESCRIPTORW.flags and .fileAttributes.
     private const uint FdAttributes = 0x00000004;
@@ -52,6 +53,9 @@ public static class Clipboard
 
     /// <summary>Result of parsing a Filecontents Request: which file, size-vs-range, and the range.</summary>
     public readonly record struct FileContentsReq(uint StreamId, uint Index, bool WantSize, ulong Position, uint Length);
+
+    /// <summary>One file's essentials parsed from a FILEGROUPDESCRIPTORW (client → mock paste).</summary>
+    public readonly record struct FileDescriptor(string Name, long Size);
 
     private static byte[] Pdu(ushort msgType, ushort msgFlags, ReadOnlySpan<byte> data)
     {
@@ -175,5 +179,70 @@ public static class Clipboard
         var data = pdu.Slice(8, Math.Min(dataLen, pdu.Length - 8));
         string s = Encoding.Unicode.GetString(data);
         return s.TrimEnd('\0');
+    }
+
+    // ── inbound (client → mock) file paste ────────────────────────────────────
+
+    /// <summary>Filecontents <b>Range</b> Request: ask the client for <paramref name="length"/> bytes
+    /// of file <paramref name="index"/> starting at <paramref name="position"/> (mock is the requester).</summary>
+    public static byte[] FilecontentsRangeRequest(uint streamId, uint index, ulong position, uint length)
+    {
+        var d = new ByteWriter();
+        d.WriteUInt32LE(streamId);
+        d.WriteUInt32LE(index);
+        d.WriteUInt32LE(FileContentsRange);
+        d.WriteUInt32LE((uint)(position & 0xFFFFFFFF));
+        d.WriteUInt32LE((uint)(position >> 32));
+        d.WriteUInt32LE(length);
+        return Pdu(CbFilecontentsRequest, 0, d.AsSpan());
+    }
+
+    /// <summary>Scans a client Format List (long names) for a "FileGroupDescriptorW" entry and returns
+    /// the format id the client assigned it, or 0 if the client isn't offering files.</summary>
+    public static uint ParseFormatListFileId(ReadOnlySpan<byte> pdu)
+    {
+        if (pdu.Length < 8) return 0;
+        int dataLen = (int)BinaryPrimitives.ReadUInt32LittleEndian(pdu.Slice(4, 4));
+        int end = Math.Min(8 + dataLen, pdu.Length);
+        int pos = 8;
+        while (pos + 4 <= end)
+        {
+            uint formatId = BinaryPrimitives.ReadUInt32LittleEndian(pdu.Slice(pos, 4));
+            pos += 4;
+            // Long format name: UTF-16, NUL-terminated.
+            int nameStart = pos;
+            while (pos + 2 <= end && !(pdu[pos] == 0 && pdu[pos + 1] == 0)) pos += 2;
+            var name = Encoding.Unicode.GetString(pdu.Slice(nameStart, pos - nameStart));
+            pos += 2; // skip the UTF-16 NUL
+            if (name.Equals("FileGroupDescriptorW", StringComparison.OrdinalIgnoreCase))
+                return formatId;
+        }
+        return 0;
+    }
+
+    /// <summary>Parses the first file's name + size from a FILEGROUPDESCRIPTORW Format Data Response.</summary>
+    public static FileDescriptor? ReadFileGroupDescriptor(ReadOnlySpan<byte> pdu)
+    {
+        // 8-byte header, then cItems(4), then FILEDESCRIPTORW[0] (592 bytes). Within the whole PDU:
+        //   fileSizeHigh @ 76, fileSizeLow @ 80, fileName[260 WCHAR] @ 84.
+        if (pdu.Length < 84 + 2) return null;
+        uint high = BinaryPrimitives.ReadUInt32LittleEndian(pdu.Slice(76, 4));
+        uint low = BinaryPrimitives.ReadUInt32LittleEndian(pdu.Slice(80, 4));
+        long size = ((long)high << 32) | low;
+        int nameBytes = Math.Min(520, pdu.Length - 84);
+        var name = Encoding.Unicode.GetString(pdu.Slice(84, nameBytes)).TrimEnd('\0');
+        // Take just the leaf name (descriptors may carry relative paths with backslashes).
+        int slash = name.LastIndexOf('\\');
+        if (slash >= 0) name = name[(slash + 1)..];
+        return new FileDescriptor(name, size);
+    }
+
+    /// <summary>Extracts the file bytes from a Filecontents Response (past the streamId).</summary>
+    public static byte[] ReadFilecontentsResponseData(ReadOnlySpan<byte> pdu)
+    {
+        if (pdu.Length < 12) return Array.Empty<byte>();
+        int dataLen = (int)BinaryPrimitives.ReadUInt32LittleEndian(pdu.Slice(4, 4));
+        int total = Math.Min(dataLen, pdu.Length - 8);   // streamId(4) + bytes
+        return total <= 4 ? Array.Empty<byte>() : pdu.Slice(12, total - 4).ToArray();
     }
 }

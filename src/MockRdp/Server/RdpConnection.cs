@@ -43,6 +43,16 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private ushort _cliprdrChannelId;
     private bool _offeredServerClipboard;
 
+    // Clipboard file transfer state. The mock offers one file (defaults to the built-in sample, or
+    // whatever the user copies on the desktop). For inbound paste it becomes the requester: it learns
+    // the client's FileGroupDescriptorW format id, asks for the descriptor, then the bytes.
+    private string _offeredFileName = Clipboard.ServedFileName;
+    private byte[] _offeredFileBytes = Clipboard.ServedFileBytes;
+    private uint _clientFileFormatId;              // the id the client assigned FileGroupDescriptorW
+    private enum PasteState { Idle, WaitingDescriptor, WaitingContents }
+    private PasteState _pasteState;
+    private string _pasteFileName = "";
+
     // Dynamic virtual channels (MS-RDPEDYC over "drdynvc"). The server advertises
     // capabilities, then opens each configured channel and echoes data back on it.
     private ushort _drdynvcChannelId;
@@ -638,20 +648,23 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         {
             case Clipboard.CbFormatList:
                 await SendClipboardAsync(Clipboard.FormatListResponseOk(), ct);
+                // Remember whether the client is offering files (for a later paste).
+                _clientFileFormatId = Clipboard.ParseFormatListFileId(clipPdu);
+                if (_clientFileFormatId != 0) log.LogInformation("Clipboard: client is offering file(s) (format id 0x{Id:X4}).", _clientFileFormatId);
                 if (!_offeredServerClipboard)
                 {
                     _offeredServerClipboard = true;
                     await SendClipboardAsync(Clipboard.FormatListWithFile(), ct);
-                    log.LogInformation("Clipboard: offered CF_UNICODETEXT + a file ({File}).", Clipboard.ServedFileName);
+                    log.LogInformation("Clipboard: offered CF_UNICODETEXT + a file ({File}).", _offeredFileName);
                 }
                 break;
 
             case Clipboard.CbFormatDataRequest:
                 if (Clipboard.ReadFormatDataRequestId(clipPdu) == Clipboard.FileGroupDescriptorId)
                 {
-                    await SendClipboardAsync(Clipboard.FormatDataResponseFileList(Clipboard.ServedFileName, Clipboard.ServedFileBytes.Length), ct);
+                    await SendClipboardAsync(Clipboard.FormatDataResponseFileList(_offeredFileName, _offeredFileBytes.Length), ct);
                     log.LogInformation("Clipboard: served file descriptor for '{File}' ({Size} bytes).",
-                        Clipboard.ServedFileName, Clipboard.ServedFileBytes.Length);
+                        _offeredFileName, _offeredFileBytes.Length);
                 }
                 else
                 {
@@ -666,18 +679,46 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 if (req.WantSize)
                 {
                     await SendClipboardAsync(Clipboard.FilecontentsResponse(req.StreamId,
-                        BitConverter.GetBytes((ulong)Clipboard.ServedFileBytes.Length)), ct);
+                        BitConverter.GetBytes((ulong)_offeredFileBytes.Length)), ct);
                     log.LogInformation("Clipboard: served file size ({Size}) for stream {Stream}.",
-                        Clipboard.ServedFileBytes.Length, req.StreamId);
+                        _offeredFileBytes.Length, req.StreamId);
                 }
                 else
                 {
-                    int start = (int)Math.Min(req.Position, (ulong)Clipboard.ServedFileBytes.Length);
-                    int len = (int)Math.Min(req.Length, (uint)(Clipboard.ServedFileBytes.Length - start));
+                    int start = (int)Math.Min(req.Position, (ulong)_offeredFileBytes.Length);
+                    int len = (int)Math.Min(req.Length, (uint)(_offeredFileBytes.Length - start));
                     await SendClipboardAsync(Clipboard.FilecontentsResponse(req.StreamId,
-                        Clipboard.ServedFileBytes.AsSpan(start, len)), ct);
+                        _offeredFileBytes.AsSpan(start, len)), ct);
                     log.LogInformation("Clipboard: served file bytes [{Start}..{End}) for stream {Stream}.",
                         start, start + len, req.StreamId);
+                }
+                break;
+            }
+
+            // ── inbound paste (mock is the requester): descriptor → contents ──
+            case Clipboard.CbFormatDataResponse when _pasteState == PasteState.WaitingDescriptor:
+                if (Clipboard.ReadFileGroupDescriptor(clipPdu) is { } fd && fd.Size >= 0)
+                {
+                    _pasteFileName = string.IsNullOrEmpty(fd.Name) ? "pasted.bin" : fd.Name;
+                    uint want = (uint)Math.Min(fd.Size, 1 << 20);   // cap a paste at 1 MiB
+                    _pasteState = PasteState.WaitingContents;
+                    await SendClipboardAsync(Clipboard.FilecontentsRangeRequest(1, 0, 0, want), ct);
+                    log.LogInformation("Clipboard: pasting '{File}' — requested {Bytes} bytes from the client.", _pasteFileName, want);
+                }
+                else { _pasteState = PasteState.Idle; log.LogInformation("Clipboard: paste — couldn't parse the client's file descriptor."); }
+                break;
+
+            case Clipboard.CbFilecontentsResponse when _pasteState == PasteState.WaitingContents:
+            {
+                var bytes = Clipboard.ReadFilecontentsResponseData(clipPdu);
+                _pasteState = PasteState.Idle;
+                log.LogInformation("Clipboard: received '{File}' ({Bytes} bytes) from the client.", _pasteFileName, bytes.Length);
+                if (_desktop is not null)
+                {
+                    _desktop.DeliverClientFile(_pasteFileName, bytes);
+                    foreach (var note in _desktop.TakeEvents()) log.LogInformation("Desktop: {Note}", note);
+                    _desktop.Render();
+                    await SendDesktopAsync(ct);
                 }
                 break;
             }
@@ -1164,6 +1205,36 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // Drain the desktop's verification hooks (Win+R, app launches) to the logger.
         foreach (var note in _desktop.TakeEvents())
             log.LogInformation("Desktop: {Note}", note);
+
+        // Clipboard file transfer driven from the desktop.
+        if (_cliprdrChannelId != 0)
+        {
+            // Mock → client: the user copied a file; (re)offer it on the mock's clipboard.
+            if (_desktop.TakeClipboardCopy() is { } copied)
+            {
+                _offeredFileName = copied.Name;
+                _offeredFileBytes = copied.Bytes;
+                _offeredServerClipboard = true;
+                await SendClipboardAsync(Clipboard.FormatListWithFile(), ct);
+                log.LogInformation("Clipboard: offered copied file '{File}' ({Size} bytes) to the client.",
+                    copied.Name, copied.Bytes.Length);
+            }
+
+            // Client → mock: the user pressed Ctrl+V; pull the client's file if it offered one.
+            if (_desktop.TakeClipboardPasteRequest())
+            {
+                if (_clientFileFormatId != 0)
+                {
+                    _pasteState = PasteState.WaitingDescriptor;
+                    await SendClipboardAsync(Clipboard.FormatDataRequest(_clientFileFormatId), ct);
+                    log.LogInformation("Clipboard: paste requested — asking the client for its file descriptor.");
+                }
+                else
+                {
+                    log.LogInformation("Clipboard: paste requested, but the client has no file on its clipboard.");
+                }
+            }
+        }
 
         // The user typed into a DVC Console — open the channel (if needed) and send the text.
         foreach (var (channel, text) in _desktop.TakeDvcSends())

@@ -48,6 +48,7 @@ public sealed class FakeDesktop : IDisposable
         public string DvcChannel = "APP";                         // DvcApp: the channel name to send on
         public bool DvcFocusChannel;                              // DvcApp: channel field vs message field
         public string? DvcFilter;                                 // DvcMon: selected channel (null = All)
+        public VfsNode? Selected;                                 // Explorer: highlighted local file (for Ctrl+C)
         public int X, Y, W, H;
     }
 
@@ -112,6 +113,43 @@ public sealed class FakeDesktop : IDisposable
     // headless test can confirm injected keystrokes were processed without seeing the framebuffer.
     private readonly List<string> _events = new();
     private void Emit(string note) => _events.Add(note);
+
+    // Clipboard file transfer: files the user copied (Ctrl+C) to offer to the client, and whether
+    // a paste (Ctrl+V) was requested (pull a file from the client's clipboard). Drained by the
+    // connection, which drives the MS-RDPECLIP exchange.
+    private readonly List<(string Name, byte[] Bytes)> _clipCopies = new();
+    private bool _pasteRequested;
+    private long _lastClickMs;
+    private int _lastClickWinId = -1, _lastClickRow = -1;
+
+    /// <summary>A file the user copied on the desktop, to be offered to the client clipboard.</summary>
+    public (string Name, byte[] Bytes)? TakeClipboardCopy()
+    {
+        if (_clipCopies.Count == 0) return null;
+        var c = _clipCopies[0];
+        _clipCopies.RemoveAt(0);
+        return c;
+    }
+
+    /// <summary>True once if the user asked to paste a client file onto the desktop (Ctrl+V).</summary>
+    public bool TakeClipboardPasteRequest()
+    {
+        if (!_pasteRequested) return false;
+        _pasteRequested = false;
+        return true;
+    }
+
+    /// <summary>Called when a client file arrives (paste): drop it on the Desktop and open it.</summary>
+    public void DeliverClientFile(string name, byte[] bytes)
+    {
+        var text = System.Text.Encoding.UTF8.GetString(bytes);
+        var desktop = _vfsHome.Children.FirstOrDefault(c => c.Name == "Desktop" && c.IsDir) ?? _vfsHome;
+        // Replace any same-named file so repeated pastes don't pile up.
+        desktop.Children.RemoveAll(c => !c.IsDir && c.Name == name);
+        desktop.AddFile(name, text);
+        OpenNotepad(name, text);
+        Emit($"Pasted '{name}' ({bytes.Length} bytes) from client → Desktop");
+    }
     public IReadOnlyList<string> TakeEvents()
     {
         if (_events.Count == 0) return Array.Empty<string>();
@@ -301,6 +339,26 @@ public sealed class FakeDesktop : IDisposable
             return true;
         }
 
+        // Ctrl+C — copy the file selected in a focused Explorer to the client's clipboard.
+        if (_ctrl && scancode == 0x2E)   // 'C'
+        {
+            if (Focused is { Kind: WinKind.Explorer, ClientPath: null, Selected: { IsDir: false } sel })
+            {
+                _clipCopies.Add((sel.Name, System.Text.Encoding.UTF8.GetBytes(sel.Text)));
+                Emit($"Copied '{sel.Name}' → client clipboard");
+                return true;
+            }
+            return false;
+        }
+
+        // Ctrl+V — paste a file from the client's clipboard onto the desktop.
+        if (_ctrl && scancode == 0x2F)   // 'V'
+        {
+            _pasteRequested = true;
+            Emit("Ctrl+V → requesting a file from the client clipboard");
+            return true;
+        }
+
         // DVC Console: type a channel + message; Tab switches fields, Enter sends on the channel.
         if (Focused is { Kind: WinKind.DvcApp } dvc)
         {
@@ -446,12 +504,18 @@ public sealed class FakeDesktop : IDisposable
         }
         int r = row - 1;
         bool hasParent = w.Folder.Parent is not null;
-        if (hasParent && r == 0) { w.Folder = w.Folder.Parent; w.Scroll = 0; return true; }
+        if (hasParent && r == 0) { w.Folder = w.Folder.Parent; w.Scroll = 0; w.Selected = null; return true; }
         int idx = r - (hasParent ? 1 : 0);
         if (idx < 0 || idx >= w.Folder.Children.Count) return false;
         var entry = w.Folder.Children[idx];
-        if (entry.IsDir) { w.Folder = entry; w.Scroll = 0; return true; }
-        OpenNotepad(entry.Name, entry.Text);
+        if (entry.IsDir) { w.Folder = entry; w.Scroll = 0; w.Selected = null; return true; }
+
+        // Files: single-click selects (highlight, so Ctrl+C can copy it); double-click opens.
+        bool dbl = w.Id == _lastClickWinId && row == _lastClickRow
+                   && Environment.TickCount64 - _lastClickMs < 400;
+        _lastClickWinId = w.Id; _lastClickRow = row; _lastClickMs = Environment.TickCount64;
+        if (dbl) { OpenNotepad(entry.Name, entry.Text); return true; }
+        w.Selected = entry;
         return true;
     }
 
@@ -823,10 +887,11 @@ public sealed class FakeDesktop : IDisposable
         int listTop = w.Y + TitleH + 30;
         int visible = VisibleRows(w);
         int idx = 0, drawn = 0;
-        void Row(string name, string iconHex)
+        void Row(string name, string iconHex, bool selected = false)
         {
             if (idx++ < w.Scroll || drawn >= visible) return;
             int yy = listTop + drawn * RowH;
+            if (selected) Fill(ctx, "CDE6FF", w.X + 4, yy, w.W - 18, RowH);   // selection highlight
             Fill(ctx, iconHex, w.X + 14, yy + 5, 14, 11);
             Text(ctx, _small, name, w.X + 36, yy + 3, Color.ParseHex("101010"));
             drawn++;
@@ -863,7 +928,7 @@ public sealed class FakeDesktop : IDisposable
             Text(ctx, _small, w.Folder.Path, w.X + 12, w.Y + TitleH + 5, Color.ParseHex("303030"));
             Row("\\\\tsclient  (this RDP client)", "4A80E8");
             if (w.Folder.Parent is not null) Row("..", "E8C24A");
-            foreach (var child in w.Folder.Children) Row(child.Name, child.IsDir ? "E8C24A" : "B7B7B7");
+            foreach (var child in w.Folder.Children) Row(child.Name, child.IsDir ? "E8C24A" : "B7B7B7", child == w.Selected);
         }
 
         // Scrollbar (track + thumb) when the list overflows.

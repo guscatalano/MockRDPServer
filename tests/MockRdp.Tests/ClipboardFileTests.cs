@@ -49,6 +49,63 @@ public class ClipboardFileTests
         Assert.Equal(new byte[] { 1, 2, 3 }, resp.AsSpan(12, 3).ToArray());
     }
 
+    // ── inbound (client → mock) paste path ────────────────────────────────────
+
+    [Fact]
+    public void FilecontentsRangeRequest_RoundTrips()
+    {
+        var pdu = Clipboard.FilecontentsRangeRequest(streamId: 1, index: 0, position: 128, length: 64);
+        Assert.Equal(Clipboard.CbFilecontentsRequest, Clipboard.ReadMsgType(pdu));
+        var req = Clipboard.ReadFilecontentsRequest(pdu);
+        Assert.Equal(1u, req.StreamId);
+        Assert.False(req.WantSize);          // it's a range request, not a size request
+        Assert.Equal(128ul, req.Position);
+        Assert.Equal(64u, req.Length);
+    }
+
+    [Fact]
+    public void ParseFormatListFileId_FindsFileGroupDescriptor()
+    {
+        // A client-style long-name format list: a text format, then FileGroupDescriptorW at 0xC123.
+        var w = new List<byte>();
+        void U16(ushort v) => w.AddRange(BitConverter.GetBytes(v));
+        void U32(uint v) => w.AddRange(BitConverter.GetBytes(v));
+
+        var body = new List<byte>();
+        void BU32(uint v) => body.AddRange(BitConverter.GetBytes(v));
+        void BName(string s) { body.AddRange(Encoding.Unicode.GetBytes(s)); body.AddRange(new byte[] { 0, 0 }); }
+        BU32(13); BName("");                    // CF_UNICODETEXT, empty name
+        BU32(0xC123); BName("FileGroupDescriptorW");
+        U16(Clipboard.CbFormatList); U16(0); U32((uint)body.Count);
+        w.AddRange(body);
+
+        Assert.Equal(0xC123u, Clipboard.ParseFormatListFileId(w.ToArray()));
+    }
+
+    [Fact]
+    public void ParseFormatListFileId_ZeroWhenNoFile()
+    {
+        Assert.Equal(0u, Clipboard.ParseFormatListFileId(Clipboard.FormatListUnicodeText()));
+    }
+
+    [Fact]
+    public void ReadFileGroupDescriptor_RoundTripsNameAndSize()
+    {
+        var pdu = Clipboard.FormatDataResponseFileList("paste me.txt", 4096);
+        var fd = Clipboard.ReadFileGroupDescriptor(pdu);
+        Assert.NotNull(fd);
+        Assert.Equal("paste me.txt", fd!.Value.Name);
+        Assert.Equal(4096, fd.Value.Size);
+    }
+
+    [Fact]
+    public void ReadFilecontentsResponseData_ExtractsBytes()
+    {
+        var payload = new byte[] { 9, 8, 7, 6, 5 };
+        var resp = Clipboard.FilecontentsResponse(3, payload);
+        Assert.Equal(payload, Clipboard.ReadFilecontentsResponseData(resp));
+    }
+
     private static byte[] FileContentsRequest(uint streamId, bool wantSize, ulong pos, uint len)
     {
         var w = new List<byte>();

@@ -161,10 +161,17 @@ Fake desktop (`--desktop`) — a software-rendered, interactive Windows-like ses
 tiny window manager. The **Start** menu launches cascading windows; windows are **draggable**
 by their title bar (with z-order) and closable via **×**; only changed tiles are resent
 (dirty-rect); the taskbar clock ticks. **File Explorer** browses an in-memory filesystem
-(`C:\Windows`, `C:\Users`, …). **Keyboard** input works (scancode→char, US layout): type into
-Notepad, or into the **Run** dialog and press Enter to launch `explorer` / `notepad` / `cmd`;
-**Win+R** opens Run directly. **Ctrl+Alt+End** (the remote secure-attention sequence) switches
-to the **secure / Winlogon desktop**; **Esc** returns. Mirrors Windows' Default vs. Secure desktops.
+(`C:\Windows`, `C:\Users`, …) — single-click selects a file, double-click opens it. **Keyboard**
+input works (scancode→char, US layout): type into Notepad, or into the **Run** dialog and press
+Enter to launch `explorer` / `notepad` / `cmd`; **Win+R** opens Run directly. **Ctrl+Alt+End**
+(the remote secure-attention sequence) switches to the **secure / Winlogon desktop**; **Esc**
+returns. Mirrors Windows' Default vs. Secure desktops.
+
+**Clipboard file transfer** (MS-RDPECLIP, both directions): select a file in Explorer and
+**Ctrl+C** to offer it to the client — paste it into your own machine's Explorer to copy it out.
+**Ctrl+V** pulls a file from the client's clipboard onto the mock's Desktop (the mock requests the
+FileGroupDescriptorW + FileContents and drops the file, opening it in Notepad). Text copy/paste
+works too. Requires the client to redirect its clipboard.
 
 - `--screenshot <path.png>` — render one frame and exit (no server). Modifiers:
   `--logon`, `--secure`, `--start-menu`, `--stats`, `--display`, `--tsclient`, `--dvcmon`
