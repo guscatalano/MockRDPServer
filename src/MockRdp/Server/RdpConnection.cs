@@ -72,6 +72,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     }
 
     private ushort _rdpdrChannelId;
+    private uint _rdpdrClientId = 1;                 // the ClientId the client chose in its Announce Reply
     private readonly Queue<RdpdrReq> _rdpdrOps = BuildRdpdrOps(rdpdrReads, rdpdrLists, rdpdrWrites);
     private readonly Dictionary<char, uint> _rdpdrDrives = new();     // drive letter -> device id
     private readonly List<(string Name, bool IsDir)> _rdpdrEntries = new();
@@ -772,9 +773,17 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogDebug("rdpdr recv packetId=0x{Id:X4} ({Len} bytes).", Rdpdr.PacketId(pdu), pdu.Length);
         switch (Rdpdr.PacketId(pdu))
         {
+            case Rdpdr.ClientIdConfirm: // client's Announce Reply — remember the ClientId it chose
+                if (pdu.Length >= 12) _rdpdrClientId = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(pdu.AsSpan(8, 4));
+                break;
+
             case Rdpdr.ClientName: // follows the client's announce reply — now negotiate capabilities
                 await SendRdpdrAsync(Rdpdr.ServerCapabilityReq(), ct);
-                await SendRdpdrAsync(Rdpdr.ServerClientIdConfirm(1), ct);
+                await SendRdpdrAsync(Rdpdr.ServerClientIdConfirm(_rdpdrClientId), ct);
+                break;
+
+            case Rdpdr.ClientCapability: // client accepted our capabilities — signal logon so it
+                                         // announces its drives (some clients gate drives on this).
                 await SendRdpdrAsync(Rdpdr.UserLoggedOnPdu(), ct);
                 break;
 
