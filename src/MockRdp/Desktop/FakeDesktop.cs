@@ -192,7 +192,7 @@ public sealed class FakeDesktop : IDisposable
     /// Server Save Session Info ("logon") PDU. The host reads and clears it.</summary>
     public bool JustSignedIn { get; set; }
 
-    public FakeDesktop(int width, int height, bool logon = false)
+    public FakeDesktop(int width, int height, bool logon = false, VfsNode? vfsRoot = null)
     {
         Width = width;
         Height = height;
@@ -201,7 +201,9 @@ public sealed class FakeDesktop : IDisposable
         _wallpaper = BuildWallpaper(width, height);
         _font = TryLoadFont(15);
         _small = TryLoadFont(12);
-        _vfsRoot = Vfs.BuildDefault();
+        // A caller (e.g. the tray) can share one filesystem across the session and its own browser;
+        // otherwise each desktop gets a fresh per-session tree.
+        _vfsRoot = vfsRoot ?? Vfs.BuildDefault();
         _vfsHome = Vfs.Home(_vfsRoot);
         _windows.Add(new Win { Id = _nextWinId++, Title = "Welcome to mock-rdp", Body = "Open File Explorer to browse C:\\ or \\\\tsclient (your files), drag windows, Ctrl+Alt+End for the secure desktop.", X = 130, Y = 90, W = 560, H = 300 });
         Render();

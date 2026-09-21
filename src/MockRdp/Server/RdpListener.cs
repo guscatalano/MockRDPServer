@@ -19,6 +19,7 @@ public sealed class RdpListener : IDisposable
     private readonly string[]? _rdpdrLists;
     private readonly string[]? _rdpdrWrites;
     private readonly bool _desktop;
+    private readonly Desktop.VfsNode? _vfsRoot;
     private readonly bool _logon;
     private readonly bool _desktopDirect;
 
@@ -26,8 +27,9 @@ public sealed class RdpListener : IDisposable
         string[]? dvcChannels = null, string[]? rdpdrReads = null,
         Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
         string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false,
-        bool desktopDirect = false)
+        bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null)
     {
+        _vfsRoot = vfsRoot;
         _listener = new TcpListener(address, port);
         _cert = cert;
         _loggerFactory = loggerFactory;
@@ -78,7 +80,7 @@ public sealed class RdpListener : IDisposable
             using (client)
             {
                 var conn = new RdpConnection(client, _cert, log, _dvcChannels, _rdpdrReads, _dvcBehaviors,
-                    _rdpdrLists, _rdpdrWrites, _desktop, _logon, _desktopDirect);
+                    _rdpdrLists, _rdpdrWrites, _desktop, _logon, _desktopDirect, _vfsRoot);
                 await conn.RunAsync(ct);
             }
         }

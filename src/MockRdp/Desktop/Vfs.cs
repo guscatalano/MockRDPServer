@@ -47,9 +47,10 @@ public static class Vfs
             "mock-rdp — fake desktop\r\n" +
             "========================\r\n\r\n" +
             "This is a MOCK RDP server. Its filesystem (this C:\\ drive) is entirely\r\n" +
-            "IN-MEMORY and PER-SESSION: it is rebuilt from scratch each time you connect,\r\n" +
-            "and everything here is DISCARDED when you disconnect.\r\n\r\n" +
-            "Nothing is stored permanently. Nothing is written to any real disk.\r\n\r\n" +
+            "IN-MEMORY: nothing here is written to any real disk.\r\n\r\n" +
+            "Run standalone it is per-session (rebuilt on connect). Under the systray\r\n" +
+            "app it is shared with the tray's file browser, so a file you paste onto\r\n" +
+            "the Desktop shows up there.\r\n\r\n" +
             "\\\\tsclient shows your own machine's redirected drives (that IS your real\r\n" +
             "filesystem, read over the RDP drive-redirection channel) — the mock only\r\n" +
             "reads it on demand and keeps nothing.\r\n");

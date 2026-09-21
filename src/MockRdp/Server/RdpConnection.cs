@@ -21,7 +21,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     string[]? dvcChannels = null, string[]? rdpdrReads = null,
     Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
     string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false,
-    bool desktopDirect = false)
+    bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null)
 {
     private bool _nlaRequested;
     private Stream _stream = tcp.GetStream();
@@ -373,7 +373,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task DrawDesktopAsync(CancellationToken ct)
     {
         bool showLogon = !desktopDirect && (logon || !_nlaRequested);
-        _desktop = new Desktop.FakeDesktop(_width, _height, showLogon)
+        _desktop = new Desktop.FakeDesktop(_width, _height, showLogon, vfsRoot)
         {
             OnClientList = RequestClientList,
             OnClientOpen = RequestClientOpen,

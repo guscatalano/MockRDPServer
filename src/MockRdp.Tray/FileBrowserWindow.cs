@@ -15,9 +15,11 @@ internal sealed class FileBrowserWindow : Form
     private readonly TreeView _tree;
     private readonly TextBox _preview;
     private readonly Label _pathLabel;
+    private readonly VfsNode _root;
 
-    public FileBrowserWindow()
+    public FileBrowserWindow(VfsNode root)
     {
+        _root = root;
         Text = "Mock RDP — server files (in-memory C:\\)";
         Width = 820;
         Height = 560;
@@ -50,8 +52,8 @@ internal sealed class FileBrowserWindow : Form
             Dock = DockStyle.Top,
             Height = 40,
             Padding = new Padding(8, 6, 8, 0),
-            Text = "This is the mock's in-memory C:\\ drive — rebuilt per session and discarded on "
-                 + "disconnect. \\\\tsclient (a client's real redirected drives) isn't shown here.",
+            Text = "The mock's in-memory C:\\ drive, shared with the live session — a file pasted onto "
+                 + "the desktop lands under Desktop (hit Refresh). \\\\tsclient (the client's real drives) isn't shown.",
             ForeColor = Color.FromArgb(0x40, 0x40, 0x40),
         };
 
@@ -72,8 +74,7 @@ internal sealed class FileBrowserWindow : Form
     {
         _tree.BeginUpdate();
         _tree.Nodes.Clear();
-        var root = Vfs.BuildDefault();
-        var rootNode = BuildNode(root);
+        var rootNode = BuildNode(_root);   // the live shared tree — Refresh re-reads it after a paste
         _tree.Nodes.Add(rootNode);
         rootNode.Expand();
         // Expand the user's home for convenience.

@@ -26,6 +26,7 @@ internal sealed class TrayApp : IDisposable
     private CancellationTokenSource? _cts;
 
     private readonly ActivityLog _activityLog = new();   // captures the server log for the monitor
+    private readonly Desktop.VfsNode _sharedVfs = Desktop.Vfs.BuildDefault();   // one FS: session + browser
     private LogWindow? _logWindow;
     private FileBrowserWindow? _filesWindow;
 
@@ -121,7 +122,8 @@ internal sealed class TrayApp : IDisposable
         // RDPeek plugin connects and its Hello handshake is answered by the built-in diag responder.
         _listener = new RdpListener(IPAddress.Loopback, Port, cert, _activityLog,
             dvcChannels: ["ECHO", "dvc::diag::inspector", "dvc::diag::files"], rdpdrReads: null, dvcBehaviors: null,
-            rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop);
+            rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop,
+            vfsRoot: _sharedVfs);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
         UpdateStatus();
@@ -264,7 +266,7 @@ internal sealed class TrayApp : IDisposable
     {
         if (_filesWindow is null || _filesWindow.IsDisposed)
         {
-            _filesWindow = new FileBrowserWindow();
+            _filesWindow = new FileBrowserWindow(_sharedVfs);
             _filesWindow.FormClosed += (_, _) => _filesWindow = null;
             _filesWindow.Show();
         }
