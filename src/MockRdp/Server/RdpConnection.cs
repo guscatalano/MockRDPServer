@@ -597,6 +597,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 {
                     var events = Input.ParseSlowPath(data);
                     LogChannel("input", true, data.Length, InputSummary(events), render: false);
+                    // Flags are normalised by ParseSlowPath: bit0 = release (up), bit1 = extended.
+                    foreach (var ev in events)
+                        if (ev.Type == InputEventType.Scancode)
+                            log.LogInformation("Input key: scancode=0x{Code:X2} {UpDown}{Ext}", ev.Code,
+                                (ev.Flags & 0x01) != 0 ? "up" : "down", (ev.Flags & 0x02) != 0 ? " ext" : "");
+                        else if (ev.Type == InputEventType.Unicode)
+                            log.LogInformation("Input unicode: U+{Code:X4}", ev.X);
                     if (_desktop is not null) await ApplyInputAsync(events, ct);
                 }
                 else if (type2 == Finalization.Pdu2ShutdownRequest)
@@ -1153,6 +1160,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // The user picked a resolution in Display settings — schedule a server-initiated
         // Deactivation-Reactivation (the serve loop applies it after this input returns).
         if (_desktop.TakeRequestedResize() is { } r) _pendingResize = r;
+
+        // Drain the desktop's verification hooks (Win+R, app launches) to the logger.
+        foreach (var note in _desktop.TakeEvents())
+            log.LogInformation("Desktop: {Note}", note);
 
         // The user typed into a DVC Console — open the channel (if needed) and send the text.
         foreach (var (channel, text) in _desktop.TakeDvcSends())

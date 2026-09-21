@@ -105,7 +105,24 @@ public sealed class FakeDesktop : IDisposable
     private Win? _drag;
     private Win? _scrollbarDrag;                    // Explorer whose scrollbar thumb is being dragged
     private int _dragDx, _dragDy;
-    private bool _ctrl, _alt, _shift;
+    private bool _ctrl, _alt, _shift, _win;
+
+    // Observable hooks for tests/verification: human-readable notes drained by the connection and
+    // written to the logger (e.g. "Win+R → Run dialog opened", "Run launched: notepad"), so a
+    // headless test can confirm injected keystrokes were processed without seeing the framebuffer.
+    private readonly List<string> _events = new();
+    private void Emit(string note) => _events.Add(note);
+    public IReadOnlyList<string> TakeEvents()
+    {
+        if (_events.Count == 0) return Array.Empty<string>();
+        var copy = _events.ToArray();
+        _events.Clear();
+        return copy;
+    }
+
+    /// <summary>Titles of the currently open windows, front-most last — a verification hook for
+    /// window/app state (e.g. asserting Notepad opened, or reading positions).</summary>
+    public IReadOnlyList<string> OpenWindowTitles => _windows.Select(w => w.Title).ToList();
 
     private Win? Focused => _windows.Count > 0 ? _windows[^1] : null;
 
@@ -241,6 +258,7 @@ public sealed class FakeDesktop : IDisposable
         {
             case 0x1D: _ctrl = !release; return false;
             case 0x38: _alt = !release; return false;
+            case 0x5B or 0x5C: _win = !release; return false;   // Left/Right Windows key
             case Keys.LShift or Keys.RShift: _shift = !release; return false;
         }
         if (release) return false;
@@ -272,6 +290,16 @@ public sealed class FakeDesktop : IDisposable
             return false;
         }
         if (Active == DesktopKind.Secure) return false;
+
+        // Win+R — the global Run shortcut (what the RDPeek bootstrap fallback injects). Opens the Run
+        // window regardless of focus, exactly like clicking Start ▸ Run…
+        if (_win && scancode == 0x13)   // 'R'
+        {
+            StartMenuOpen = false;
+            Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 });
+            Emit("Win+R → Run dialog opened");
+            return true;
+        }
 
         // DVC Console: type a channel + message; Tab switches fields, Enter sends on the channel.
         if (Focused is { Kind: WinKind.DvcApp } dvc)
@@ -328,15 +356,18 @@ public sealed class FakeDesktop : IDisposable
     {
         var raw = run.Body.Trim();
         _windows.Remove(run);
+        Emit($"Run: entered '{raw}'");
         switch (raw.ToLowerInvariant())
         {
-            case "explorer" or "explorer.exe": Launch("File Explorer"); break;
-            case "notepad" or "notepad.exe": Launch("Notepad"); break;
+            case "explorer" or "explorer.exe": Launch("File Explorer"); Emit("Run launched: File Explorer"); break;
+            case "notepad" or "notepad.exe": Launch("Notepad"); Emit("Run launched: Notepad"); break;
             case "cmd" or "cmd.exe" or "powershell":
                 Open(new Win { Title = raw, Body = "Microsoft Windows [fake]\r\n\r\nC:\\Users\\rdpuser> ", W = 480, H = 260 });
+                Emit($"Run launched: {raw}");
                 break;
             default:
                 Open(new Win { Title = "Run", Body = raw.Length == 0 ? "Type a program name, then Enter." : $"Windows cannot find '{raw}'.", W = 420, H = 140 });
+                Emit(raw.Length == 0 ? "Run: empty command" : $"Run: cannot find '{raw}'");
                 break;
         }
     }
