@@ -1,4 +1,8 @@
-# mock-rdp
+<p align="center">
+  <img src="docs/img/logo.png" width="112" alt="mock-rdp logo">
+</p>
+
+<h1 align="center">mock-rdp</h1>
 
 A hand-rolled **mock RDP server** in C#/.NET 10, built from the Microsoft Open
 Specifications (MS-RDPBCGR et al.) as a **local test fixture** — so tooling that connects

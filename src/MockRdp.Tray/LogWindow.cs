@@ -30,6 +30,7 @@ internal sealed class LogWindow : Form
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
         MinimizeBox = true;
+        try { Icon = Branding.MakeIcon(32); } catch { /* icon is cosmetic */ }
 
         _view = new TextBox
         {

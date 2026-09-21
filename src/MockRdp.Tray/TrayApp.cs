@@ -27,6 +27,7 @@ internal sealed class TrayApp : IDisposable
 
     private readonly ActivityLog _activityLog = new();   // captures the server log for the monitor
     private LogWindow? _logWindow;
+    private FileBrowserWindow? _filesWindow;
 
     private bool Running => _listener is not null;
 
@@ -54,7 +55,7 @@ internal sealed class TrayApp : IDisposable
 
     public TrayApp()
     {
-        _icon = new NotifyIcon { Icon = MakeIcon(), Visible = true };
+        _icon = new NotifyIcon { Icon = Branding.MakeIcon(16), Visible = true };
         BuildMenu();
         _icon.ContextMenuStrip = _menu;
         _icon.DoubleClick += (_, _) => Connect(Presets[0]);
@@ -99,6 +100,7 @@ internal sealed class TrayApp : IDisposable
         _menu.Items.Add(boot);
 
         _menu.Items.Add(new ToolStripMenuItem("Activity log…", null, (_, _) => ShowLog()));
+        _menu.Items.Add(new ToolStripMenuItem("Browse server files…", null, (_, _) => ShowFiles()));
         _menu.Items.Add(new ToolStripMenuItem("Save .rdp to Desktop", null, (_, _) => SaveRdpToDesktop()));
         _menu.Items.Add(new ToolStripMenuItem("Trust server certificate (one-time)", null, (_, _) => TrustCert()));
         _menu.Items.Add(new ToolStripSeparator());
@@ -257,6 +259,23 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
+    /// <summary>Open (or focus) a browser of the mock's in-memory filesystem.</summary>
+    private void ShowFiles()
+    {
+        if (_filesWindow is null || _filesWindow.IsDisposed)
+        {
+            _filesWindow = new FileBrowserWindow();
+            _filesWindow.FormClosed += (_, _) => _filesWindow = null;
+            _filesWindow.Show();
+        }
+        else
+        {
+            if (_filesWindow.WindowState == FormWindowState.Minimized) _filesWindow.WindowState = FormWindowState.Normal;
+            _filesWindow.Activate();
+            _filesWindow.BringToFront();
+        }
+    }
+
     private void SaveRdpToDesktop()
     {
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "mock-rdp.rdp");
@@ -269,21 +288,6 @@ internal sealed class TrayApp : IDisposable
     private void Balloon(string text) =>
         _icon.ShowBalloonTip(4000, "Mock RDP", text, ToolTipIcon.Info);
 
-    private static Icon MakeIcon()
-    {
-        using var bmp = new Bitmap(16, 16);
-        using (var g = Graphics.FromImage(bmp))
-        {
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            g.Clear(Color.Transparent);
-            using var fill = new SolidBrush(Color.FromArgb(0x0E, 0x63, 0x9C));
-            g.FillRectangle(fill, 1, 1, 14, 14);
-            using var font = new Font("Segoe UI", 8f, FontStyle.Bold, GraphicsUnit.Pixel);
-            g.DrawString("R", font, Brushes.White, 3, 3);
-        }
-        return Icon.FromHandle(bmp.GetHicon());
-    }
-
     private void Exit()
     {
         StopServer();
@@ -295,6 +299,7 @@ internal sealed class TrayApp : IDisposable
     {
         StopServer();
         _logWindow?.Close();
+        _filesWindow?.Close();
         _activityLog.Dispose();
         _icon.Dispose();
         _menu.Dispose();
