@@ -43,6 +43,11 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
         shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 625)); // Start → Connection Info
     }
+    if (args.Contains("--display"))
+    {
+        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 625)); // Start → Display
+    }
     if (args.Contains("--demo"))
     {
         // Synthetic clicks: open File Explorer, browse into Documents, open readme.txt in Notepad.

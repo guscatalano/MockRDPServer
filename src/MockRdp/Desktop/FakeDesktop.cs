@@ -29,7 +29,7 @@ public sealed class FakeDesktop : IDisposable
     public string FocusedText => Focused?.Body ?? "";
     public bool IsDragging => _drag is not null;
 
-    private enum WinKind { Generic, Explorer, Notepad, Run, Stats }
+    private enum WinKind { Generic, Explorer, Notepad, Run, Stats, Display }
 
     private sealed class Win
     {
@@ -62,6 +62,15 @@ public sealed class FakeDesktop : IDisposable
     /// the live stats (uptime, DVC state) fresh.</summary>
     public bool WantsLiveTick => _windows.Any(w => w.Kind == WinKind.Stats);
 
+    /// <summary>A resolution the user picked in Display settings. The host reads and clears it and
+    /// applies it as a server-initiated Deactivation-Reactivation (no client MONITOR_LAYOUT).</summary>
+    private (int W, int H)? _requestedResize;
+    public (int W, int H)? TakeRequestedResize() { var r = _requestedResize; _requestedResize = null; return r; }
+
+    /// <summary>The resolutions offered by the Display settings window.</summary>
+    private static readonly (int W, int H)[] Resolutions =
+        [(1024, 768), (1280, 720), (1280, 800), (1600, 900), (1920, 1080)];
+
     private const string TsClient = "\\\\tsclient";
 
     private readonly List<Win> _windows = new();   // z-order: last = topmost
@@ -84,7 +93,7 @@ public sealed class FakeDesktop : IDisposable
     private const int TitleH = 30;
     private const int CloseW = 30;
     private const int StartW = 92;
-    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Settings", "Run…"];
+    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "Settings", "Run…"];
     private const int MenuW = 240;
     private const int MenuRow = 36;
 
@@ -296,7 +305,8 @@ public sealed class FakeDesktop : IDisposable
             if (InRect(x, y, w.X, w.Y, w.W, w.H))
             {
                 bool raised = Raise(i);
-                bool acted = w.Kind == WinKind.Explorer && ExplorerClick(w, x, y);
+                bool acted = (w.Kind == WinKind.Explorer && ExplorerClick(w, x, y))
+                          || (w.Kind == WinKind.Display && DisplayClick(w, x, y));
                 return raised || acted;
             }
         }
@@ -405,6 +415,7 @@ public sealed class FakeDesktop : IDisposable
             case "File Explorer": Open(new Win { Kind = WinKind.Explorer, Title = "File Explorer", Folder = _vfsHome, W = 480, H = 320 }); break;
             case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
             case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 470, H = 300 }); break;
+            case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
         }
@@ -502,11 +513,46 @@ public sealed class FakeDesktop : IDisposable
             case WinKind.Notepad: DrawNotepad(ctx, w, focused); break;
             case WinKind.Run: DrawRun(ctx, w, focused); break;
             case WinKind.Stats: DrawStats(ctx, w); break;
+            case WinKind.Display: DrawDisplay(ctx, w); break;
             default: Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020")); break;
         }
 
         // Black window border (drawn last so it sits on top of the content).
         ctx.Draw(Color.Black, 2f, new RectangularPolygon(w.X, w.Y, w.W, w.H));
+    }
+
+    private const int DisplayRowH = 34;
+
+    private static int DisplayRowsTop(Win w) => w.Y + TitleH + 34;
+
+    /// <summary>A click in the Display settings window: pick a resolution → request a server-initiated
+    /// Deactivation-Reactivation to that size.</summary>
+    private bool DisplayClick(Win w, int x, int y)
+    {
+        int top = DisplayRowsTop(w);
+        if (y < top || x < w.X + 12 || x > w.X + w.W - 12) return false;
+        int row = (y - top) / DisplayRowH;
+        if (row < 0 || row >= Resolutions.Length) return false;
+        var (rw, rh) = Resolutions[row];
+        if (rw == Width && rh == Height) return false;   // already at this size
+        _requestedResize = (rw, rh);
+        return true;
+    }
+
+    private void DrawDisplay(IImageProcessingContext ctx, Win w)
+    {
+        Fill(ctx, "FFFFFF", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
+        Text(ctx, _small, "Screen resolution (applied by the server):", w.X + 14, w.Y + TitleH + 10, Color.ParseHex("505050"));
+        int top = DisplayRowsTop(w);
+        for (int i = 0; i < Resolutions.Length; i++)
+        {
+            var (rw, rh) = Resolutions[i];
+            bool current = rw == Width && rh == Height;
+            int ry = top + i * DisplayRowH;
+            Fill(ctx, current ? "0E639C" : "EDEDED", w.X + 12, ry, w.W - 24, DisplayRowH - 6);
+            Text(ctx, _small, $"{rw} × {rh}" + (current ? "   (current)" : ""),
+                w.X + 24, ry + 6, current ? Color.White : Color.ParseHex("101010"));
+        }
     }
 
     private void DrawStats(IImageProcessingContext ctx, Win w)

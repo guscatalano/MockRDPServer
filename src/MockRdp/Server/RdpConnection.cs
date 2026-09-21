@@ -969,6 +969,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // An Explorer \\tsclient click may have queued an on-demand rdpdr op — start it.
         if (_rdpdrKick) { _rdpdrKick = false; if (_rdpdrPhase == RdpdrPhase.Idle) await StartNextRdpdrOpAsync(ct); }
 
+        // The user picked a resolution in Display settings — schedule a server-initiated
+        // Deactivation-Reactivation (the serve loop applies it after this input returns).
+        if (_desktop.TakeRequestedResize() is { } r) _pendingResize = r;
+
         // The user just signed in at the logon screen — send the Server Save Session Info
         // ("logon") PDU (MS-RDPBCGR 2.2.10.1) before painting the desktop, as a real host would.
         if (_desktop.JustSignedIn)

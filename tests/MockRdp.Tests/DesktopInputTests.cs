@@ -76,7 +76,7 @@ public class DesktopInputTests
         Assert.Equal(1, d.WindowCount);
 
         d.OnInput(LeftClick(10, 748));               // open Start menu
-        Assert.True(d.OnInput(LeftClick(20, 555)));  // click the first menu item (File Explorer)
+        Assert.True(d.OnInput(LeftClick(20, 520)));  // click the first menu item (File Explorer)
         Assert.Equal(2, d.WindowCount);              // a window launched
 
         // Drag the launched window by its title bar (press → move → release).
@@ -90,7 +90,7 @@ public class DesktopInputTests
     {
         using var d = new FakeDesktop(1024, 768);
         d.OnInput(LeftClick(10, 748));               // Start
-        d.OnInput(LeftClick(20, 555));               // File Explorer (opens at the user's home)
+        d.OnInput(LeftClick(20, 520));               // File Explorer (opens at the user's home)
         Assert.Equal(2, d.WindowCount);
 
         // Rows now: \\tsclient(196), ..(218), Documents(240) — click Documents, then readme.txt.
@@ -110,7 +110,7 @@ public class DesktopInputTests
         Assert.False(d.WantsLiveTick);
 
         d.OnInput(LeftClick(10, 748));               // Start
-        d.OnInput(LeftClick(20, 625));               // Connection Info (3rd item)
+        d.OnInput(LeftClick(20, 590));               // Connection Info (3rd item)
 
         Assert.Equal(2, d.WindowCount);
         Assert.Equal("Connection Info", d.FocusedTitle);
@@ -118,10 +118,30 @@ public class DesktopInputTests
     }
 
     [Fact]
+    public void StartMenu_Display_PicksResolution_RequestsServerResize()
+    {
+        using var d = new FakeDesktop(1024, 768);
+        Assert.Null(d.TakeRequestedResize());
+
+        d.OnInput(LeftClick(10, 748));               // Start
+        d.OnInput(LeftClick(20, 625));               // Display (4th item)
+        Assert.Equal("Display settings", d.FocusedTitle);
+
+        // Window opens at X=186,Y=136 (2nd window). Rows start at Y+30+34=200, each 34px.
+        // Row 0 is 1024x768 (current, a no-op); row 1 is 1280x720.
+        Assert.False(d.OnInput(LeftClick(210, 210))); // clicking the current resolution does nothing
+        Assert.Null(d.TakeRequestedResize());
+
+        Assert.True(d.OnInput(LeftClick(210, 244)));  // pick 1280x720
+        Assert.Equal((1280, 720), d.TakeRequestedResize());
+        Assert.Null(d.TakeRequestedResize());         // read-and-clear
+    }
+
+    [Fact]
     public void Keyboard_TypesIntoNotepad()
     {
         using var d = new FakeDesktop(1024, 768);
-        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 590)); // Start → Notepad
+        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 555)); // Start → Notepad
         Type(d, "hi");
         Assert.Equal("hi", d.FocusedText);
     }
