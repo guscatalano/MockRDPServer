@@ -3,7 +3,6 @@ using System.Drawing;
 using System.Net;
 using System.Text;
 using System.Windows.Forms;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Win32;
 using MockRdp.Server;
 using MockRdp.Transport;
@@ -25,6 +24,9 @@ internal sealed class TrayApp : IDisposable
 
     private RdpListener? _listener;
     private CancellationTokenSource? _cts;
+
+    private readonly ActivityLog _activityLog = new();   // captures the server log for the monitor
+    private LogWindow? _logWindow;
 
     private bool Running => _listener is not null;
 
@@ -96,6 +98,7 @@ internal sealed class TrayApp : IDisposable
         boot.CheckedChanged += (_, _) => { _bootToDesktop = boot.Checked; RestartServer(); };
         _menu.Items.Add(boot);
 
+        _menu.Items.Add(new ToolStripMenuItem("Activity log…", null, (_, _) => ShowLog()));
         _menu.Items.Add(new ToolStripMenuItem("Save .rdp to Desktop", null, (_, _) => SaveRdpToDesktop()));
         _menu.Items.Add(new ToolStripMenuItem("Trust server certificate (one-time)", null, (_, _) => TrustCert()));
         _menu.Items.Add(new ToolStripSeparator());
@@ -114,7 +117,7 @@ internal sealed class TrayApp : IDisposable
         _cts = new CancellationTokenSource();
         // Open ECHO (for the DVC Console demo) plus RDPeek's diagnostics channels, so a registered
         // RDPeek plugin connects and its Hello handshake is answered by the built-in diag responder.
-        _listener = new RdpListener(IPAddress.Loopback, Port, cert, NullLoggerFactory.Instance,
+        _listener = new RdpListener(IPAddress.Loopback, Port, cert, _activityLog,
             dvcChannels: ["ECHO", "dvc::diag::inspector", "dvc::diag::files"], rdpdrReads: null, dvcBehaviors: null,
             rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop);
         _listener.Start();
@@ -237,6 +240,23 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
+    /// <summary>Open (or focus) the live activity monitor showing the server's log stream.</summary>
+    private void ShowLog()
+    {
+        if (_logWindow is null || _logWindow.IsDisposed)
+        {
+            _logWindow = new LogWindow(_activityLog);
+            _logWindow.FormClosed += (_, _) => _logWindow = null;
+            _logWindow.Show();
+        }
+        else
+        {
+            if (_logWindow.WindowState == FormWindowState.Minimized) _logWindow.WindowState = FormWindowState.Normal;
+            _logWindow.Activate();
+            _logWindow.BringToFront();
+        }
+    }
+
     private void SaveRdpToDesktop()
     {
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "mock-rdp.rdp");
@@ -274,6 +294,8 @@ internal sealed class TrayApp : IDisposable
     public void Dispose()
     {
         StopServer();
+        _logWindow?.Close();
+        _activityLog.Dispose();
         _icon.Dispose();
         _menu.Dispose();
     }
