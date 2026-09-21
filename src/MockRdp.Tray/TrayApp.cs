@@ -112,8 +112,10 @@ internal sealed class TrayApp : IDisposable
         var cert = CertProvider.GetOrCreatePersistent(CertPath);
         PinServerCert(cert.GetCertHash());
         _cts = new CancellationTokenSource();
+        // Open ECHO (for the DVC Console demo) plus RDPeek's diagnostics channels, so a registered
+        // RDPeek plugin connects and its Hello handshake is answered by the built-in diag responder.
         _listener = new RdpListener(IPAddress.Loopback, Port, cert, NullLoggerFactory.Instance,
-            dvcChannels: null, rdpdrReads: null, dvcBehaviors: null,
+            dvcChannels: ["ECHO", "dvc::diag::inspector", "dvc::diag::files"], rdpdrReads: null, dvcBehaviors: null,
             rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
