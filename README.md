@@ -171,9 +171,10 @@ returns. Mirrors Windows' Default vs. Secure desktops.
 **Ctrl+C** to offer it to the client — paste it into your own machine's Explorer to copy it out.
 **Ctrl+V** pulls a file from the client's clipboard onto the mock's Desktop (the mock requests the
 FileGroupDescriptorW + FileContents and drops the file, opening it in Notepad). Text copy/paste
-works too. Requires the client to redirect its clipboard. `Downloads\large-sample.dat` is a 32 MiB
-file **generated on the fly** (no memory cost) — copy it out to watch the client's transfer
-**progress bar** (large FileContents responses are split across the negotiated VC chunk size).
+works too. Requires the client to redirect its clipboard. `Downloads\` holds **generated** files —
+`sample-32mb.dat`, `sample-320mb.dat`, `sample-3gb.dat` — streamed on the fly (no memory cost); copy
+one out to watch the client's transfer **progress bar** (large FileContents responses are split
+across the negotiated VC chunk size).
 
 - `--screenshot <path.png>` — render one frame and exit (no server). Modifiers:
   `--logon`, `--secure`, `--start-menu`, `--stats`, `--display`, `--tsclient`, `--dvcmon`

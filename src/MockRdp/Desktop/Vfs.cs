@@ -88,8 +88,12 @@ public static class Vfs
             "Hello from the mock RDP desktop.\r\n\r\nThis file lives in an in-memory VFS and\r\nis served by the fake File Explorer.");
         docs.AddFile("notes.txt", "- wire up the desktop\r\n- add a filesystem\r\n- open files in Notepad\r\n- profit");
         var dl = user.AddDir("Downloads");
-        // A big generated file: select it and Ctrl+C to copy it to the client and watch the progress bar.
-        dl.AddLargeFile("large-sample.dat", 32L * 1024 * 1024);   // 32 MiB, streamed on the fly
+        // Generated files, streamed on the fly (no memory cost): select one and Ctrl+C to copy it to
+        // the client and watch the transfer progress bar. The 3 GB file really does write 3 GB to
+        // the client's disk when pasted.
+        dl.AddLargeFile("sample-32mb.dat", 32L * 1024 * 1024);
+        dl.AddLargeFile("sample-320mb.dat", 320L * 1024 * 1024);
+        dl.AddLargeFile("sample-3gb.dat", 3L * 1024 * 1024 * 1024);
         user.AddDir("Desktop");
 
         var pf = c.AddDir("Program Files");
