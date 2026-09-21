@@ -10,7 +10,7 @@ namespace MockRdp.Desktop;
 
 /// <summary>Which desktop within the (fake) window station is active — mirroring Windows'
 /// Default (interactive) vs. Winlogon (secure) desktops.</summary>
-public enum DesktopKind { Default, Secure }
+public enum DesktopKind { Default, Secure, Logon }
 
 /// <summary>
 /// A software-rendered fake Windows session with a tiny window manager. Owns a framebuffer,
@@ -80,10 +80,15 @@ public sealed class FakeDesktop : IDisposable
     private const int MenuW = 240;
     private const int MenuRow = 36;
 
-    public FakeDesktop(int width, int height)
+    private string _logonUser = "rdpuser";
+    private string _logonPassword = "";
+    private bool _logonFocusUser;   // false = password field focused
+
+    public FakeDesktop(int width, int height, bool logon = false)
     {
         Width = width;
         Height = height;
+        Active = logon ? DesktopKind.Logon : DesktopKind.Default;
         _fb = new Image<Rgba32>(width, height);
         _wallpaper = new Image<Rgba32>(width, height);
         _wallpaper.Mutate(ctx => ctx.Fill(new LinearGradientBrush(
@@ -136,6 +141,24 @@ public sealed class FakeDesktop : IDisposable
             case Keys.LShift or Keys.RShift: _shift = !release; return false;
         }
         if (release) return false;
+
+        if (Active == DesktopKind.Logon)
+        {
+            if (scancode == Keys.Enter) return SignIn();           // any credentials accepted
+            if (scancode == 0x0F) { _logonFocusUser = !_logonFocusUser; return true; } // Tab
+            if (scancode == Keys.Backspace)
+            {
+                if (_logonFocusUser) { if (_logonUser.Length == 0) return false; _logonUser = _logonUser[..^1]; }
+                else { if (_logonPassword.Length == 0) return false; _logonPassword = _logonPassword[..^1]; }
+                return true;
+            }
+            if (Keys.ScancodeToChar(scancode, _shift) is { } lc)
+            {
+                if (_logonFocusUser) _logonUser += lc; else _logonPassword += lc;
+                return true;
+            }
+            return false;
+        }
 
         // mstsc maps Ctrl+Alt+End → Ctrl+Alt+Del on the wire (Del = 0x53); accept End (0x4F) too.
         if ((scancode == 0x53 || scancode == 0x4F) && _ctrl && _alt) return Switch(DesktopKind.Secure);
@@ -190,6 +213,13 @@ public sealed class FakeDesktop : IDisposable
 
     private bool OnMouseDown(int x, int y)
     {
+        if (Active == DesktopKind.Logon)
+        {
+            if (InRect(x, y, SignInBtn())) return SignIn();
+            if (InRect(x, y, LogonField(true))) { _logonFocusUser = true; return true; }
+            if (InRect(x, y, LogonField(false))) { _logonFocusUser = false; return true; }
+            return false;
+        }
         if (Active == DesktopKind.Secure)
             return InRect(x, y, CancelBtn()) && Switch(DesktopKind.Default);
 
@@ -384,8 +414,12 @@ public sealed class FakeDesktop : IDisposable
 
     public void Render() => _fb.Mutate(ctx =>
     {
-        if (Active == DesktopKind.Secure) RenderSecure(ctx);
-        else RenderDefault(ctx);
+        switch (Active)
+        {
+            case DesktopKind.Secure: RenderSecure(ctx); break;
+            case DesktopKind.Logon: RenderLogon(ctx); break;
+            default: RenderDefault(ctx); break;
+        }
     });
 
     private void RenderDefault(IImageProcessingContext ctx)
@@ -525,6 +559,49 @@ public sealed class FakeDesktop : IDisposable
     {
         var (dx, dy, dw, dh) = Dialog();
         return [dx + dw - 110, dy + dh - 44, 90, 30];
+    }
+
+    private bool SignIn() => Switch(DesktopKind.Default); // any credentials accepted
+
+    private static (int X, int Y, int W, int H) LogonBox(int width, int height)
+    {
+        int bw = 420, bh = 280;
+        return ((width - bw) / 2, (height - bh) / 2, bw, bh);
+    }
+
+    private int[] LogonField(bool user)
+    {
+        var (bx, by, bw, _) = LogonBox(Width, Height);
+        return [bx + 24, by + (user ? 66 : 120), bw - 48, 26];
+    }
+
+    private int[] SignInBtn()
+    {
+        var (bx, by, _, _) = LogonBox(Width, Height);
+        return [bx + 24, by + 168, 130, 34];
+    }
+
+    private void RenderLogon(IImageProcessingContext ctx)
+    {
+        ctx.Fill(Color.ParseHex("0B2A4A"));
+        var (bx, by, bw, bh) = LogonBox(Width, Height);
+        Fill(ctx, "12385F", bx, by, bw, bh);
+        Text(ctx, _font, "Sign in", bx + 24, by + 18, Color.White);
+
+        Text(ctx, _small, "User name", bx + 24, by + 50, Color.ParseHex("A8BCD4"));
+        var uf = LogonField(true);
+        Fill(ctx, "FFFFFF", uf[0], uf[1], uf[2], uf[3]);
+        Text(ctx, _small, _logonUser + (_logonFocusUser ? "_" : ""), uf[0] + 6, uf[1] + 5, Color.ParseHex("101010"));
+
+        Text(ctx, _small, "Password", bx + 24, by + 104, Color.ParseHex("A8BCD4"));
+        var pf = LogonField(false);
+        Fill(ctx, "FFFFFF", pf[0], pf[1], pf[2], pf[3]);
+        Text(ctx, _small, new string('•', _logonPassword.Length) + (_logonFocusUser ? "" : "_"), pf[0] + 6, pf[1] + 5, Color.ParseHex("101010"));
+
+        var b = SignInBtn();
+        Fill(ctx, "2A6AB0", b[0], b[1], b[2], b[3]);
+        Text(ctx, _small, "Sign in", b[0] + 34, b[1] + 9, Color.White);
+        Text(ctx, _small, "Mock logon — any credentials are accepted. (No NLA; sign in at the desktop.)", bx + 24, by + bh - 26, Color.ParseHex("7C90A8"));
     }
 
     private static void Fill(IImageProcessingContext ctx, string hex, int x, int y, int w, int h) =>

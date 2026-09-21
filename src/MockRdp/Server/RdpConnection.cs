@@ -20,8 +20,9 @@ namespace MockRdp.Server;
 public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log,
     string[]? dvcChannels = null, string[]? rdpdrReads = null,
     Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
-    string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false)
+    string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false)
 {
+    private bool _nlaRequested;
     private Stream _stream = tcp.GetStream();
     private ushort _cliprdrChannelId;
     private bool _offeredServerClipboard;
@@ -109,6 +110,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
         log.LogInformation("Connection Request: cookie={Cookie} requested={Protocols}",
             cr.Cookie ?? "(none)", cr.HasNegReq ? cr.RequestedProtocols : "(no negReq)");
+
+        // NLA/CredSSP (HYBRID) requested => the user authenticated at connect, so the fake
+        // desktop boots straight in; otherwise it shows a logon screen (like UserAuthentication=0).
+        _nlaRequested = cr.HasNegReq && (cr.RequestedProtocols & (RdpNegProtocol.Hybrid | RdpNegProtocol.HybridEx)) != 0;
 
         // M1 policy: TLS only. Reject anything that does not offer PROTOCOL_SSL.
         if (!cr.HasNegReq || (cr.RequestedProtocols & RdpNegProtocol.Ssl) == 0)
@@ -289,11 +294,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     /// <summary>Renders the fake Windows desktop and sends it as bitmap-update tiles.</summary>
     private async Task DrawDesktopAsync(CancellationToken ct)
     {
-        _desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight)
+        bool showLogon = logon || !_nlaRequested;
+        _desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight, showLogon)
         {
             OnClientList = RequestClientList,
             OnClientOpen = RequestClientOpen,
         };
+        log.LogInformation("Fake desktop booting to {Boot} (NLA requested: {Nla}).",
+            showLogon ? "logon screen" : "desktop", _nlaRequested);
         await SendDesktopAsync(ct);
         log.LogInformation("Rendered fake desktop.");
     }

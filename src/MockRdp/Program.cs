@@ -19,12 +19,13 @@ string? logFile = null;
 var dvcReplies = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
 var dvcFaults = new Dictionary<string, Dvc.Fault>(StringComparer.OrdinalIgnoreCase);
 bool desktop = args.Contains("--desktop");
+bool logon = args.Contains("--logon");
 
 // --screenshot <path>: render one desktop frame to PNG and exit (no server).
 int ssIdx = Array.IndexOf(args, "--screenshot");
 if (ssIdx >= 0 && ssIdx + 1 < args.Length)
 {
-    using var shot = new MockRdp.Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight);
+    using var shot = new MockRdp.Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight, args.Contains("--logon"));
     if (args.Contains("--secure")) shot.Active = MockRdp.Desktop.DesktopKind.Secure;
     if (args.Contains("--start-menu")) shot.StartMenuOpen = true;
     if (args.Contains("--demo"))
@@ -113,7 +114,7 @@ if (dvcReplies.Count > 0 || dvcFaults.Count > 0)
 }
 
 using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
-    rdpdrLists, rdpdrWrites, desktop);
+    rdpdrLists, rdpdrWrites, desktop, logon);
 listener.Start();
 
 using var cts = new CancellationTokenSource();
