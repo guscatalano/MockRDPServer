@@ -12,6 +12,9 @@ namespace MockRdp.Desktop;
 /// Default (interactive) vs. Winlogon (secure) desktops.</summary>
 public enum DesktopKind { Default, Secure, Logon }
 
+/// <summary>One line of dynamic-virtual-channel traffic for the DVC Monitor.</summary>
+public readonly record struct DvcEvent(string Time, bool Inbound, string Channel, int Bytes, string Note);
+
 /// <summary>
 /// A software-rendered fake Windows session with a tiny window manager. Owns a framebuffer,
 /// a list of draggable windows, a Start menu that launches windows, and a secure/Winlogon
@@ -44,6 +47,7 @@ public sealed class FakeDesktop : IDisposable
         public int Scroll;                                        // Explorer: first visible row
         public string DvcChannel = "APP";                         // DvcApp: the channel name to send on
         public bool DvcFocusChannel;                              // DvcApp: channel field vs message field
+        public string? DvcFilter;                                 // DvcMon: selected channel (null = All)
         public int X, Y, W, H;
     }
 
@@ -60,9 +64,10 @@ public sealed class FakeDesktop : IDisposable
     /// describing the RDP connection (state, channels, redirected drives, …).</summary>
     public Func<IReadOnlyList<(string Label, string Value)>>? ConnectionStats;
 
-    /// <summary>Feeds the DVC Monitor window: the most recent dynamic-virtual-channel traffic lines
-    /// (newest last), each already formatted for display.</summary>
-    public Func<IReadOnlyList<string>>? DvcTraffic;
+    /// <summary>Feeds the DVC Monitor window: recent DVC traffic (newest last) and the list of
+    /// currently-active channels (for the left-hand channel picker).</summary>
+    public Func<IReadOnlyList<DvcEvent>>? DvcTraffic;
+    public Func<IReadOnlyList<string>>? DvcChannels;
 
     /// <summary>True while a live window (Connection Info / DVC Monitor) is open, so the host ticks
     /// faster and keeps its contents fresh.</summary>
@@ -382,7 +387,8 @@ public sealed class FakeDesktop : IDisposable
                 if (ScrollbarHit(w, x, y)) { _scrollbarDrag = w; ScrollbarSetFromY(w, y); return true; }
                 bool acted = (w.Kind == WinKind.Explorer && ExplorerClick(w, x, y))
                           || (w.Kind == WinKind.Display && DisplayClick(w, x, y))
-                          || (w.Kind == WinKind.DvcApp && DvcAppClick(w, x, y));
+                          || (w.Kind == WinKind.DvcApp && DvcAppClick(w, x, y))
+                          || (w.Kind == WinKind.DvcMon && DvcMonClick(w, x, y));
                 return raised || acted;
             }
         }
@@ -670,28 +676,58 @@ public sealed class FakeDesktop : IDisposable
         }
     }
 
+    private const int DvcLeftW = 150;   // channel-picker pane width
+    private const int DvcRowH = 22;
+
+    private List<string> DvcMonItems() => ["All", .. (DvcChannels?.Invoke() ?? [])];
+
+    /// <summary>A click in the DVC Monitor's left pane selects a channel to filter the feed by.</summary>
+    private bool DvcMonClick(Win w, int x, int y)
+    {
+        int cx = w.X + 6, top = w.Y + TitleH + 12;
+        if (x < cx || x > cx + DvcLeftW) return false;
+        int row = (y - (top - 2)) / DvcRowH;
+        var items = DvcMonItems();
+        if (row < 0 || row >= items.Count) return false;
+        w.DvcFilter = row == 0 ? null : items[row];
+        return true;
+    }
+
     private void DrawDvcMon(IImageProcessingContext ctx, Win w)
     {
-        // Dark, terminal-like panel with a live feed of drdynvc traffic.
-        Fill(ctx, "12141A", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
-        var lines = DvcTraffic?.Invoke();
-        int top = w.Y + TitleH + 14, lineH = 17;
-        int rows = Math.Max(1, (w.H - TitleH - 24) / lineH);
-        if (lines is null || lines.Count == 0)
+        int cx = w.X + 6, cy = w.Y + TitleH + 6, ch = w.H - TitleH - 12;
+        int rx = cx + DvcLeftW + 4, rw = w.X + w.W - 6 - rx;
+        Fill(ctx, "1B2130", cx, cy, DvcLeftW, ch);   // left: channel picker
+        Fill(ctx, "12141A", rx, cy, rw, ch);         // right: traffic feed
+
+        // Left pane: All + each active channel; the selected one is highlighted.
+        var items = DvcMonItems();
+        int top = cy + 8;
+        for (int i = 0; i < items.Count; i++)
         {
-            Text(ctx, _small, "Waiting for dynamic virtual channel traffic…", w.X + 14, top, Color.ParseHex("7A8290"));
-            Text(ctx, _small, "(resize the window or change resolution to see PDUs flow)", w.X + 14, top + lineH, Color.ParseHex("50565F"));
+            int ry = top + i * DvcRowH;
+            if (ry + DvcRowH > cy + ch) break;
+            bool sel = i == 0 ? w.DvcFilter is null : string.Equals(w.DvcFilter, items[i], StringComparison.Ordinal);
+            if (sel) Fill(ctx, "0E639C", cx + 2, ry - 2, DvcLeftW - 4, DvcRowH);
+            Text(ctx, _small, items[i], cx + 10, ry, sel ? Color.White : Color.ParseHex("A8B0BE"));
+        }
+
+        // Right pane: the traffic, filtered to the selected channel.
+        var events = DvcTraffic?.Invoke();
+        int lineH = 17, rtop = cy + 8, rows = Math.Max(1, (ch - 16) / lineH);
+        if (events is null || events.Count == 0)
+        {
+            Text(ctx, _small, "No DVC traffic yet.", rx + 10, rtop, Color.ParseHex("7A8290"));
+            Text(ctx, _small, "Send on a channel with DVC Console.", rx + 10, rtop + lineH, Color.ParseHex("50565F"));
             return;
         }
-        int start = Math.Max(0, lines.Count - rows);   // show the most recent lines
-        int yy = top;
-        for (int i = start; i < lines.Count; i++)
+        var shown = w.DvcFilter is null ? events : events.Where(e => e.Channel == w.DvcFilter).ToList();
+        int start = Math.Max(0, shown.Count - rows), yy = rtop;
+        for (int i = start; i < shown.Count; i++)
         {
-            var line = lines[i];
-            var color = line.Contains(" ← ") ? Color.ParseHex("7FD7A0")   // inbound (client → server)
-                      : line.Contains(" → ") ? Color.ParseHex("6FB7E8")   // outbound (server → client)
-                      : Color.ParseHex("C8CDD4");
-            Text(ctx, _small, line, w.X + 14, yy, color);
+            var e = shown[i];
+            var color = e.Inbound ? Color.ParseHex("7FD7A0") : Color.ParseHex("6FB7E8");
+            Text(ctx, _small, $"{e.Time} {(e.Inbound ? "←" : "→")} {e.Channel} · {e.Bytes}B · {e.Note}", rx + 10, yy, color);
             yy += lineH;
         }
     }
