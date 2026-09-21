@@ -41,7 +41,21 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
             ("Redirected drives", "C:, D:"),
         ];
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 625)); // Start → Connection Info
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 590)); // Start → Connection Info
+    }
+    if (args.Contains("--scroll"))
+    {
+        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
+        InputEvent Move(ushort x, ushort y) => new(InputEventType.Mouse, Input.PtrFlagsMove, x, y, 0);
+        InputEvent Up(ushort x, ushort y) => new(InputEventType.Mouse, Input.PtrFlagsButton1, x, y, 0);
+        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 520));  // Start → File Explorer
+        shot.OnInput(Click(250, 226)); shot.OnInput(Click(250, 226)); // .. → Users → C:
+        shot.OnInput(Click(250, 248)); shot.OnInput(Click(250, 248)); // Windows → System32 (overflows)
+        if (!args.Contains("--top"))
+        {
+            shot.OnInput(Click(656, 210));                            // grab the scrollbar
+            shot.OnInput(Move(656, 350)); shot.OnInput(Up(656, 350)); // drag it down
+        }
     }
     if (args.Contains("--display"))
     {

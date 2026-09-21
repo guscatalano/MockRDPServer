@@ -75,6 +75,7 @@ public sealed class FakeDesktop : IDisposable
 
     private readonly List<Win> _windows = new();   // z-order: last = topmost
     private Win? _drag;
+    private Win? _scrollbarDrag;                    // Explorer whose scrollbar thumb is being dragged
     private int _dragDx, _dragDy;
     private bool _ctrl, _alt, _shift;
 
@@ -145,6 +146,7 @@ public sealed class FakeDesktop : IDisposable
         _wallpaper = BuildWallpaper(width, height);
         _tileHash = null;                       // grid size changed → next DirtyTiles resends everything
         _drag = null;
+        _scrollbarDrag = null;
         foreach (var w in _windows)
         {
             w.X = Math.Clamp(w.X, -w.W + 80, Math.Max(0, width - 80));
@@ -176,7 +178,7 @@ public sealed class FakeDesktop : IDisposable
                 bool down = (ev.Flags & Input.PtrFlagsDown) != 0;
                 if (btn1 && down) return OnMouseDown(ev.X, ev.Y);
                 if (btn1 && !down) return OnMouseUp();
-                if (_drag is not null && (ev.Flags & Input.PtrFlagsMove) != 0) return OnMouseMove(ev.X, ev.Y);
+                if ((_drag is not null || _scrollbarDrag is not null) && (ev.Flags & Input.PtrFlagsMove) != 0) return OnMouseMove(ev.X, ev.Y);
                 return false;
             default:
                 return false;
@@ -305,6 +307,7 @@ public sealed class FakeDesktop : IDisposable
             if (InRect(x, y, w.X, w.Y, w.W, w.H))
             {
                 bool raised = Raise(i);
+                if (ScrollbarHit(w, x, y)) { _scrollbarDrag = w; ScrollbarSetFromY(w, y); return true; }
                 bool acted = (w.Kind == WinKind.Explorer && ExplorerClick(w, x, y))
                           || (w.Kind == WinKind.Display && DisplayClick(w, x, y));
                 return raised || acted;
@@ -365,10 +368,33 @@ public sealed class FakeDesktop : IDisposable
 
     private bool OnMouseMove(int x, int y)
     {
+        if (_scrollbarDrag is { } sw) { ScrollbarSetFromY(sw, y); return true; }
         if (_drag is null) return false;
         _drag.X = Math.Clamp(x - _dragDx, -_drag.W + 80, Width - 80);
         _drag.Y = Math.Clamp(y - _dragDy, 0, Height - Taskbar - TitleH);
         return true;
+    }
+
+    /// <summary>The Explorer scrollbar track (x, top, height, total rows, visible rows), or null
+    /// when the list fits and no scrollbar is shown.</summary>
+    private static (int SbX, int Top, int TrackH, int Total, int Visible)? Scrollbar(Win w)
+    {
+        if (w.Kind != WinKind.Explorer) return null;
+        int visible = VisibleRows(w), total = RowCount(w);
+        if (total <= visible) return null;
+        int listTop = w.Y + TitleH + 30;
+        return (w.X + w.W - 10, listTop, visible * RowH, total, visible);
+    }
+
+    private static bool ScrollbarHit(Win w, int x, int y) =>
+        Scrollbar(w) is { } sb && x >= sb.SbX - 4 && x <= sb.SbX + 10 && y >= sb.Top && y <= sb.Top + sb.TrackH;
+
+    private static void ScrollbarSetFromY(Win w, int y)
+    {
+        if (Scrollbar(w) is not { } sb) return;
+        int max = sb.Total - sb.Visible;
+        double frac = (double)(y - sb.Top) / sb.TrackH;
+        w.Scroll = Math.Clamp((int)Math.Round(frac * max), 0, max);
     }
 
     private bool OnWheel(ushort flags)
@@ -394,8 +420,9 @@ public sealed class FakeDesktop : IDisposable
 
     private bool OnMouseUp()
     {
-        bool wasDragging = _drag is not null;
+        bool wasDragging = _drag is not null || _scrollbarDrag is not null;
         _drag = null;
+        _scrollbarDrag = null;
         return wasDragging;   // final position already rendered during move; report a change to flush
     }
 
@@ -414,7 +441,7 @@ public sealed class FakeDesktop : IDisposable
         {
             case "File Explorer": Open(new Win { Kind = WinKind.Explorer, Title = "File Explorer", Folder = _vfsHome, W = 480, H = 320 }); break;
             case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
-            case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 470, H = 300 }); break;
+            case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 540, H = 340 }); break;
             case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
@@ -461,6 +488,7 @@ public sealed class FakeDesktop : IDisposable
         Active = kind;
         StartMenuOpen = false;
         _drag = null;
+        _scrollbarDrag = null;
         return true;
     }
 
@@ -564,13 +592,13 @@ public sealed class FakeDesktop : IDisposable
             Text(ctx, _small, "No connection data.", w.X + 16, w.Y + TitleH + 16, Color.ParseHex("808080"));
             return;
         }
-        int yy = w.Y + TitleH + 16;
-        int labelX = w.X + 16, valueX = w.X + 160;
+        int yy = w.Y + TitleH + 18;
+        int labelX = w.X + 18, valueX = w.X + 176;
         foreach (var (label, value) in rows)
         {
             Text(ctx, _small, label, labelX, yy, Color.ParseHex("606060"));
             Text(ctx, _small, value, valueX, yy, Color.ParseHex("101010"));
-            yy += 28;
+            yy += 32;
         }
     }
 

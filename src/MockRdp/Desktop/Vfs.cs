@@ -55,7 +55,18 @@ public static class Vfs
             "reads it on demand and keeps nothing.\r\n");
 
         var win = c.AddDir("Windows");
-        win.AddDir("System32");
+        var sys32 = win.AddDir("System32");
+        // A long, obviously-scrollable listing (drag the scrollbar or use the wheel).
+        foreach (var name in new[]
+        {
+            "kernel32.dll", "user32.dll", "gdi32.dll", "ntdll.dll", "advapi32.dll", "shell32.dll",
+            "ole32.dll", "comctl32.dll", "ws2_32.dll", "crypt32.dll", "rpcrt4.dll", "msvcrt.dll",
+            "cmd.exe", "notepad.exe", "calc.exe", "mstsc.exe", "explorer.exe", "svchost.exe",
+            "taskmgr.exe", "regedit.exe", "services.exe", "lsass.exe", "conhost.exe", "dwm.exe",
+            "drivers", "en-US", "config", "spool", "wbem", "WindowsPowerShell",
+        })
+            if (name.Contains('.')) sys32.AddFile(name, $"(mock stub for {name})");
+            else sys32.AddDir(name);
         win.AddFile("win.ini", "; for 16-bit app support\r\n[fonts]\r\n[extensions]\r\n");
 
         var users = c.AddDir("Users");
