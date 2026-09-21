@@ -76,21 +76,22 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
     }
     if (args.Contains("--dvcmon"))
     {
-        shot.DvcChannels = () => ["drdynvc", "APP", "DisplayControl", "ECHO"];
+        shot.DvcChannels = () => ["input", "graphics", "rdpdr", "cliprdr", "drdynvc", "APP", "DisplayControl", "ECHO"];
         shot.DvcTraffic = () =>
         [
             new("20:31:04", false, "drdynvc", 12, "server capabilities v1"),
             new("20:31:04", true, "drdynvc", 12, "client capabilities v3"),
             new("20:31:04", false, "ECHO", 11, "create request (id 1)"),
             new("20:31:04", true, "ECHO", 10, "create OK (id 1)"),
-            new("20:31:04", false, "DisplayControl", 45, "create request (id 2)"),
-            new("20:31:04", true, "DisplayControl", 10, "create OK (id 2)"),
             new("20:31:04", false, "DisplayControl", 20, "caps PDU"),
+            new("20:31:06", false, "graphics", 4820, "bitmap update · 6 tiles"),
+            new("20:31:07", true, "input", 22, "move · 1 ev"),
+            new("20:31:07", true, "input", 22, "click · 1 ev"),
+            new("20:31:08", true, "cliprdr", 24, "msgType 0x0002"),
             new("20:31:18", true, "DisplayControl", 56, "monitor layout 1280×800"),
             new("20:31:22", false, "APP", 13, "console: \"hello world\""),
-            new("20:31:22", false, "APP", 9, "console: \"again\""),
         ];
-        shot.OpenApp("DVC Monitor");
+        shot.OpenApp("Channel Monitor");
         if (args.Contains("--filter-app"))   // click the "APP" channel in the left pane (row 2)
             shot.OnInput(new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), 250, 224, 0));
     }

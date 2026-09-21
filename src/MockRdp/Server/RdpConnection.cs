@@ -54,19 +54,39 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private readonly Dictionary<string, List<string>> _dvcPendingSends = new(StringComparer.Ordinal); // console msgs awaiting channel open
     private readonly HashSet<uint> _consoleChannels = new();         // DVC Console channels — don't echo their data
 
-    // Records one event of dynamic-virtual-channel traffic for the desktop's DVC Monitor.
-    private void LogDvc(bool inbound, string channel, int bytes, string note)
+    // Records one traffic event for the desktop's Channel Monitor. `render` repaints the monitor
+    // immediately (for low-volume channels); high-volume ones (graphics/input) pass false and
+    // ride the next natural frame instead, to avoid a render storm.
+    private void LogChannel(string channel, bool inbound, int bytes, string note, bool render = true)
     {
         _dvcLog.Add(new Desktop.DvcEvent(DateTime.Now.ToString("HH:mm:ss"), inbound, channel, bytes, note));
-        if (_dvcLog.Count > 500) _dvcLog.RemoveRange(0, _dvcLog.Count - 500);
-        if (_desktop?.HasDvcMonitor == true) _desktopNeedsSend = true;   // repaint the monitor live
+        if (_dvcLog.Count > 600) _dvcLog.RemoveRange(0, _dvcLog.Count - 600);
+        if (render && _desktop?.HasDvcMonitor == true) _desktopNeedsSend = true;
     }
 
-    /// <summary>The DVC channels currently visible in the Monitor's picker: the drdynvc transport
-    /// plus every open dynamic channel.</summary>
-    private IReadOnlyList<string> BuildDvcChannels()
+    private static string InputSummary(IReadOnlyList<InputEvent> events)
     {
-        var list = new List<string> { "drdynvc" };
+        if (events.Count == 0) return "input";
+        var kinds = new HashSet<string>();
+        foreach (var e in events)
+            kinds.Add(e.Type switch
+            {
+                InputEventType.Scancode or InputEventType.Unicode => "key",
+                InputEventType.Mouse => (e.Flags & Input.PtrFlagsButton1) != 0 ? "click"
+                                      : (e.Flags & 0x0200) != 0 ? "wheel" : "move",
+                _ => e.Type.ToString().ToLowerInvariant(),
+            });
+        return string.Join("/", kinds) + $" · {events.Count} ev";
+    }
+
+    /// <summary>The channels shown in the Monitor's picker: the core I/O traffic (input, graphics),
+    /// the open static virtual channels, and the drdynvc transport with its dynamic channels.</summary>
+    private IReadOnlyList<string> BuildChannels()
+    {
+        var list = new List<string> { "input", "graphics" };
+        if (_rdpdrChannelId != 0) list.Add("rdpdr");
+        if (_cliprdrChannelId != 0) list.Add("cliprdr");
+        if (_drdynvcChannelId != 0) list.Add("drdynvc");
         list.AddRange(_dvcOpen.Values.Select(DvcLabel).Distinct().OrderBy(n => n, StringComparer.Ordinal));
         return list;
     }
@@ -349,7 +369,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             OnClientOpen = RequestClientOpen,
             ConnectionStats = BuildConnectionStats,
             DvcTraffic = () => _dvcLog.ToArray(),
-            DvcChannels = BuildDvcChannels,
+            DvcChannels = BuildChannels,
         };
         log.LogInformation("Fake desktop booting to {Boot} (NLA requested: {Nla}).",
             showLogon ? "logon screen" : "desktop", _nlaRequested);
@@ -448,13 +468,19 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     {
         if (_desktop is null) return;
         // Write all changed tiles, then flush once (per-tile flushing is the drag bottleneck).
-        int tiles = 0;
+        int tiles = 0, bytes = 0;
         foreach (var (x, y, w, h, pixels) in _desktop.DirtyTiles())
         {
-            await _stream.WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels)), ct);
+            var pdu = McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels));
+            await _stream.WriteAsync(pdu, ct);
             tiles++;
+            bytes += pdu.Length;
         }
-        if (tiles > 0) await _stream.FlushAsync(ct);
+        if (tiles > 0)
+        {
+            await _stream.FlushAsync(ct);
+            LogChannel("graphics", false, bytes, $"bitmap update · {tiles} tile{(tiles == 1 ? "" : "s")}", render: false);
+        }
     }
 
     /// <summary>M5: keeps the active session alive, reacting to client input. While idle it
@@ -567,7 +593,9 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 int type2 = Finalization.DataPduType2(data);
                 if (type2 == Finalization.Pdu2Input)
                 {
-                    if (_desktop is not null) await ApplyInputAsync(Input.ParseSlowPath(data), ct);
+                    var events = Input.ParseSlowPath(data);
+                    LogChannel("input", true, data.Length, InputSummary(events), render: false);
+                    if (_desktop is not null) await ApplyInputAsync(events, ct);
                 }
                 else if (type2 == Finalization.Pdu2ShutdownRequest)
                 {
@@ -596,6 +624,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     /// <summary>Handles one CLIPRDR PDU: acks format lists, offers text, and serves it on request.</summary>
     private async Task HandleClipboardAsync(byte[] clipPdu, CancellationToken ct)
     {
+        LogChannel("cliprdr", true, clipPdu.Length, $"msgType 0x{Clipboard.ReadMsgType(clipPdu):X4}");
         switch (Clipboard.ReadMsgType(clipPdu))
         {
             case Clipboard.CbFormatList:
@@ -650,8 +679,11 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
     }
 
-    private Task SendClipboardAsync(byte[] cliprdrPdu, CancellationToken ct) =>
-        WriteAsync(McsPdu.BuildSendDataIndication(_cliprdrChannelId, VirtualChannel.Wrap(cliprdrPdu)), ct);
+    private Task SendClipboardAsync(byte[] cliprdrPdu, CancellationToken ct)
+    {
+        LogChannel("cliprdr", false, cliprdrPdu.Length, $"msgType 0x{Clipboard.ReadMsgType(cliprdrPdu):X4}");
+        return WriteAsync(McsPdu.BuildSendDataIndication(_cliprdrChannelId, VirtualChannel.Wrap(cliprdrPdu)), ct);
+    }
 
     /// <summary>Opens the DVC layer: advertise capabilities. Channels are created once the
     /// client answers with its capabilities response.</summary>
@@ -660,7 +692,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         if (_drdynvcChannelId == 0) return;
         var caps = Dvc.BuildCapabilitiesV1();
         await SendDvcAsync(caps, ct);
-        LogDvc(false, "drdynvc", caps.Length, "server capabilities v1");
+        LogChannel("drdynvc", false, caps.Length, "server capabilities v1");
         log.LogInformation("DVC (drdynvc) ready on {Channel}: sent capabilities v1.", _drdynvcChannelId);
     }
 
@@ -677,7 +709,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         {
             case Dvc.Cmd.Capabilities:
                 _dvcVersion = msg.Version;
-                LogDvc(true, "drdynvc", pdu.Length, $"client capabilities v{msg.Version}");
+                LogChannel("drdynvc", true, pdu.Length, $"client capabilities v{msg.Version}");
                 log.LogInformation("DVC: client capabilities (version {Version}); opening {Count} channel(s).",
                     msg.Version, _dvcChannelNames.Length);
                 foreach (var name in _dvcChannelNames)
@@ -691,7 +723,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             case Dvc.Cmd.Create: // inbound Create is a create RESPONSE
                 var name0 = _dvcPending.Remove(msg.ChannelId, out var pending) ? pending : $"#{msg.ChannelId}";
                 int status = Dvc.CreationStatus(msg);
-                LogDvc(true, DvcLabel(name0), pdu.Length, status == 0 ? $"create OK (id {msg.ChannelId})" : $"create rejected 0x{(uint)status:X8}");
+                LogChannel(DvcLabel(name0), true, pdu.Length, status == 0 ? $"create OK (id {msg.ChannelId})" : $"create rejected 0x{(uint)status:X8}");
                 if (status == 0)
                 {
                     _dvcOpen[msg.ChannelId] = name0;
@@ -702,7 +734,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                         var caps = DisplayControl.BuildCapsPdu();
                         foreach (var p in Dvc.BuildData(msg.ChannelId, caps))
                             await SendDvcAsync(p, ct);
-                        LogDvc(false, "DisplayControl", caps.Length, "caps PDU");
+                        LogChannel("DisplayControl", false, caps.Length, "caps PDU");
                         log.LogInformation("Display Control ready on DVC id {Id}: sent caps.", msg.ChannelId);
                     }
                     else if (_dvcPendingSends.Remove(name0, out var queued))
@@ -728,7 +760,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             case Dvc.Cmd.Close:
                 if (_dvcOpen.Remove(msg.ChannelId, out var closed))
                 {
-                    LogDvc(true, DvcLabel(closed), pdu.Length, "close");
+                    LogChannel(DvcLabel(closed), true, pdu.Length, "close");
                     log.LogInformation("DVC: client closed channel '{Name}' (id {Id}).", closed, msg.ChannelId);
                 }
                 _dvcReasm.Remove(msg.ChannelId);
@@ -758,7 +790,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         foreach (var p in Dvc.BuildData(channelId, payload))
             await SendDvcAsync(p, ct);
         var preview = text.Length > 24 ? text[..24] + "…" : text;
-        LogDvc(false, DvcLabel(channel), payload.Length, $"console: \"{preview}\"");
+        LogChannel(DvcLabel(channel), false, payload.Length, $"console: \"{preview}\"");
         log.LogInformation("DVC console: sent {Count} bytes on '{Channel}'.", payload.Length, channel);
     }
 
@@ -768,7 +800,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         _dvcPending[id] = name;
         var req = Dvc.BuildCreateRequest(id, name);
         await SendDvcAsync(req, ct);
-        LogDvc(false, DvcLabel(name), req.Length, $"create request (id {id})");
+        LogChannel(DvcLabel(name), false, req.Length, $"create request (id {id})");
         log.LogInformation("DVC: create request for '{Name}' (id {Id}).", name, id);
     }
 
@@ -803,7 +835,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         if (msg.ChannelId == _displayControlId)
         {
             var size = DisplayControl.ParseMonitorLayout(complete);
-            LogDvc(true, "DisplayControl", complete.Length,
+            LogChannel("DisplayControl", true, complete.Length,
                 size is { } sz ? $"monitor layout {sz.Width}×{sz.Height}" : "monitor layout");
             if (size is { } s && (s.Width != _width || s.Height != _height))
             {
@@ -816,12 +848,12 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // Data the client sends back on a DVC Console channel: show it, but don't echo (avoid loops).
         if (_consoleChannels.Contains(msg.ChannelId))
         {
-            LogDvc(true, DvcLabel(_dvcOpen[msg.ChannelId]), complete.Length, "data (from client)");
+            LogChannel(DvcLabel(_dvcOpen[msg.ChannelId]), true, complete.Length, "data (from client)");
             return;
         }
 
         var name = _dvcOpen[msg.ChannelId];
-        LogDvc(true, DvcLabel(name), complete.Length, "data");
+        LogChannel(DvcLabel(name), true, complete.Length, "data");
         var behavior = _dvcBehaviors.GetValueOrDefault(name);
         var fault = behavior?.Fault ?? Dvc.Fault.None;
 
@@ -855,7 +887,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             : Dvc.BuildData(msg.ChannelId, reply);
         foreach (var outPdu in pdus)
             await SendDvcAsync(outPdu, ct);
-        LogDvc(false, DvcLabel(name), reply.Length, how + (pdus.Count > 1 ? $" ({pdus.Count} fragments)" : ""));
+        LogChannel(DvcLabel(name), false, reply.Length, how + (pdus.Count > 1 ? $" ({pdus.Count} fragments)" : ""));
     }
 
     private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>
@@ -885,6 +917,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task HandleRdpdrAsync(byte[] pdu, CancellationToken ct)
     {
         log.LogDebug("rdpdr recv packetId=0x{Id:X4} ({Len} bytes).", Rdpdr.PacketId(pdu), pdu.Length);
+        LogChannel("rdpdr", true, pdu.Length, $"packetId 0x{Rdpdr.PacketId(pdu):X4}");
         switch (Rdpdr.PacketId(pdu))
         {
             case Rdpdr.ClientIdConfirm: // client's Announce Reply — remember the ClientId it chose
@@ -1066,13 +1099,17 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         await SendRdpdrAsync(Rdpdr.CloseRequest(_rdpdrDeviceId, _rdpdrFileId, ++_rdpdrCompletionId), ct);
     }
 
-    private Task SendRdpdrAsync(byte[] pdu, CancellationToken ct) =>
-        WriteAsync(McsPdu.BuildSendDataIndication(_rdpdrChannelId, VirtualChannel.Wrap(pdu)), ct);
+    private Task SendRdpdrAsync(byte[] pdu, CancellationToken ct)
+    {
+        LogChannel("rdpdr", false, pdu.Length, $"packetId 0x{Rdpdr.PacketId(pdu):X4}");
+        return WriteAsync(McsPdu.BuildSendDataIndication(_rdpdrChannelId, VirtualChannel.Wrap(pdu)), ct);
+    }
 
     /// <summary>Decodes fast-path input; feeds the desktop, or draws markers in non-desktop mode.</summary>
     private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)
     {
         var events = Input.ParseFastPath(fastPathHeader, payload);
+        LogChannel("input", true, payload.Length, InputSummary(events), render: false);
         if (_desktop is not null) { await ApplyInputAsync(events, ct); return; }
 
         foreach (var ev in events)

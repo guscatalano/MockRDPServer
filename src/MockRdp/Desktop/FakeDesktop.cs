@@ -122,7 +122,7 @@ public sealed class FakeDesktop : IDisposable
     private const int TitleH = 30;
     private const int CloseW = 30;
     private const int StartW = 92;
-    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "DVC Monitor", "DVC Console", "Settings", "Run…"];
+    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "Channel Monitor", "DVC Console", "Settings", "Run…"];
     private const int MenuW = 240;
     private const int MenuRow = 36;
 
@@ -522,7 +522,7 @@ public sealed class FakeDesktop : IDisposable
             case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
             case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 560, H = 440 }); break;
             case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
-            case "DVC Monitor": Open(new Win { Kind = WinKind.DvcMon, Title = "DVC Monitor — live channel traffic", W = 600, H = 380 }); break;
+            case "Channel Monitor": Open(new Win { Kind = WinKind.DvcMon, Title = "Channel Monitor — input · graphics · SVC · DVC", W = 640, H = 400 }); break;
             case "DVC Console": Open(new Win { Kind = WinKind.DvcApp, Title = "DVC Console — send on a channel", W = 440, H = 230 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
@@ -717,8 +717,8 @@ public sealed class FakeDesktop : IDisposable
         int lineH = 17, rtop = cy + 8, rows = Math.Max(1, (ch - 16) / lineH);
         if (events is null || events.Count == 0)
         {
-            Text(ctx, _small, "No DVC traffic yet.", rx + 10, rtop, Color.ParseHex("7A8290"));
-            Text(ctx, _small, "Send on a channel with DVC Console.", rx + 10, rtop + lineH, Color.ParseHex("50565F"));
+            Text(ctx, _small, "No traffic yet.", rx + 10, rtop, Color.ParseHex("7A8290"));
+            Text(ctx, _small, "Move the mouse, or send on a channel with DVC Console.", rx + 10, rtop + lineH, Color.ParseHex("50565F"));
             return;
         }
         var shown = w.DvcFilter is null ? events : events.Where(e => e.Channel == w.DvcFilter).ToList();
