@@ -26,13 +26,14 @@ public static class Capabilities
     private const ushort CapFont = 14;
     private const ushort CapVirtualChannel = 20;
 
-    /// <summary>Builds the RDP payload for a Demand Active PDU (to be wrapped in an MCS Send Data Indication).</summary>
-    public static byte[] BuildDemandActive()
+    /// <summary>Builds the RDP payload for a Demand Active PDU (to be wrapped in an MCS Send Data
+    /// Indication) at the given desktop size. Sent at activation and again on a resolution change.</summary>
+    public static byte[] BuildDemandActive(int width = DesktopWidth, int height = DesktopHeight)
     {
         var caps = new ByteWriter();
         int count = 0;
         WriteGeneral(caps); count++;
-        WriteBitmap(caps); count++;
+        WriteBitmap(caps, width, height); count++;
         WriteOrder(caps); count++;
         WritePointer(caps); count++;
         WriteInput(caps); count++;
@@ -53,6 +54,19 @@ public static class Capabilities
         body.WriteUInt32LE(0);                              // sessionId
 
         return ShareControl.Wrap(ShareControl.DemandActive, Gcc.ServerChannelId, body.AsSpan());
+    }
+
+    /// <summary>Builds a Deactivate All PDU (MS-RDPBCGR 2.2.3.1): the first step of a
+    /// Deactivation-Reactivation Sequence, telling the client the share is no longer active
+    /// before a new Demand Active (e.g. at a different resolution) is sent.</summary>
+    public static byte[] BuildDeactivateAll()
+    {
+        ReadOnlySpan<byte> source = "RDP\0"u8;
+        var body = new ByteWriter();
+        body.WriteUInt32LE(ShareId);
+        body.WriteUInt16LE((ushort)source.Length);   // lengthSourceDescriptor
+        body.WriteBytes(source);                      // sourceDescriptor
+        return ShareControl.Wrap(ShareControl.Deactivate, Gcc.ServerChannelId, body.AsSpan());
     }
 
     private static void WriteCap(ByteWriter w, ushort type, ReadOnlySpan<byte> data)
@@ -79,15 +93,15 @@ public static class Capabilities
         WriteCap(caps, CapGeneral, d.AsSpan());
     }
 
-    private static void WriteBitmap(ByteWriter caps)
+    private static void WriteBitmap(ByteWriter caps, int width, int height)
     {
         var d = new ByteWriter();
         d.WriteUInt16LE(BitsPerPixel);   // preferredBitsPerPixel
         d.WriteUInt16LE(1);              // receive1BitPerPixel
         d.WriteUInt16LE(1);              // receive4BitsPerPixel
         d.WriteUInt16LE(1);              // receive8BitsPerPixel
-        d.WriteUInt16LE(DesktopWidth);
-        d.WriteUInt16LE(DesktopHeight);
+        d.WriteUInt16LE((ushort)width);
+        d.WriteUInt16LE((ushort)height);
         d.WriteUInt16LE(0);              // pad
         d.WriteUInt16LE(1);              // desktopResizeFlag
         d.WriteUInt16LE(1);              // bitmapCompressionFlag (MUST be 1)

@@ -30,6 +30,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private IReadOnlyList<string> _requestedChannels = [];
     private string _clientUser = "";
     private string _clientDomain = "";
+
+    // Current desktop resolution (changed by a Display Control resize / Deactivation-Reactivation).
+    private int _width = Capabilities.DesktopWidth;
+    private int _height = Capabilities.DesktopHeight;
+    private ushort _userChannelId;
+    private uint _displayControlId;                 // DVC id of Microsoft::Windows::RDS::DisplayControl (0 = not open)
+    private (int W, int H)? _pendingResize;         // set by a MONITOR_LAYOUT PDU; applied by the serve loop
     private ushort _cliprdrChannelId;
     private bool _offeredServerClipboard;
 
@@ -175,6 +182,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         int rdpdrIndex = channels.FindIndex(n => string.Equals(n, "rdpdr", StringComparison.OrdinalIgnoreCase));
         _rdpdrChannelId = rdpdrIndex >= 0 ? (ushort)(Gcc.FirstVirtualChannelId + rdpdrIndex) : (ushort)0;
         ushort userChannelId = (ushort)(Gcc.FirstVirtualChannelId + channelCount);
+        _userChannelId = userChannelId;
         log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested ({Names}).",
             channelCount, string.Join(", ", channels));
 
@@ -237,8 +245,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("Sent licensing: valid client (no license required).");
 
         State = ConnectionState.CapabilityExchange;
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDemandActive()), ct);
-        log.LogInformation("Sent Demand Active (capabilities).");
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDemandActive(_width, _height)), ct);
+        log.LogInformation("Sent Demand Active (capabilities) at {W}x{H}.", _width, _height);
 
         State = ConnectionState.Finalization;
         while (true)
@@ -266,10 +274,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 log.LogDebug("Client Data PDU, pduType2={Type2}.", type2);
                 if (type2 == Finalization.Pdu2FontList)
                 {
-                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildSynchronize(userChannelId)), ct);
-                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlCooperate()), ct);
-                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlGranted(userChannelId)), ct);
-                    await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildFontMap()), ct);
+                    await SendFinalizationAsync(ct);
                     State = ConnectionState.Active;
                     log.LogInformation("Finalization complete — session ACTIVE.");
                     if (desktop) await DrawDesktopAsync(ct);
@@ -288,6 +293,16 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
     }
 
+    /// <summary>Sends the four finalization PDUs (Synchronize, Control Cooperate/Granted, Font Map)
+    /// that complete activation — used both at connect and after a Deactivation-Reactivation.</summary>
+    private async Task SendFinalizationAsync(CancellationToken ct)
+    {
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildSynchronize(_userChannelId)), ct);
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlCooperate()), ct);
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlGranted(_userChannelId)), ct);
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildFontMap()), ct);
+    }
+
     /// <summary>M4: draws the startup test pattern (a row of colour squares) via bitmap updates.</summary>
     private async Task DrawTestPatternAsync(CancellationToken ct)
     {
@@ -304,7 +319,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task DrawDesktopAsync(CancellationToken ct)
     {
         bool showLogon = logon || !_nlaRequested;
-        _desktop = new Desktop.FakeDesktop(Capabilities.DesktopWidth, Capabilities.DesktopHeight, showLogon)
+        _desktop = new Desktop.FakeDesktop(_width, _height, showLogon)
         {
             OnClientList = RequestClientList,
             OnClientOpen = RequestClientOpen,
@@ -438,6 +453,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             else
                 await HandleSlowPathAsync(frame.Value.Payload, ct);
 
+            // A Display Control MONITOR_LAYOUT PDU asked for a new resolution — apply it now
+            // (no pending read is in flight here, so the reactivation can read its own frames).
+            if (_pendingResize is { } rs)
+            {
+                _pendingResize = null;
+                await ReactivateAsync(rs.W, rs.H, ct);
+            }
+
             // An rdpdr result (e.g. a \\tsclient listing) may have updated the desktop.
             if (_desktopNeedsSend && _desktop is not null)
             {
@@ -446,6 +469,42 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 await SendDesktopAsync(ct);
             }
         }
+    }
+
+    /// <summary>Performs a Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3) to change the
+    /// desktop resolution: Deactivate All → Demand Active at the new size → wait for the client's
+    /// Confirm Active + Font List → finalization, then resize the framebuffer and repaint.</summary>
+    private async Task ReactivateAsync(int width, int height, CancellationToken ct)
+    {
+        log.LogInformation("Reactivation: {OldW}x{OldH} → {W}x{H}.", _width, _height, width, height);
+        _width = width;
+        _height = height;
+
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDeactivateAll()), ct);
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDemandActive(_width, _height)), ct);
+
+        // Read the client's re-finalization: it re-sends Confirm Active then the Font List.
+        while (true)
+        {
+            var frame = await ReadFrameAsync(ct);
+            if (frame is null) { log.LogWarning("Client disconnected during reactivation."); return; }
+            if (frame.Value.FastPath) { await HandleInputAsync(frame.Value.Header, frame.Value.Payload, ct); continue; }
+
+            var mcs = Cotp.StripDataTpdu(frame.Value.Payload);
+            if (McsPdu.ClassifyDomainPdu(mcs) != McsDomainPdu.SendDataRequest) continue;
+            var (channelId, data) = McsPdu.ParseSendData(mcs);
+            if (channelId != Gcc.IoChannelId) continue;                    // ignore VC traffic mid-resize
+            if (ShareControl.PduType(data) == (ShareControl.Data & 0x0F)
+                && Finalization.DataPduType2(data) == Finalization.Pdu2FontList)
+            {
+                await SendFinalizationAsync(ct);
+                break;
+            }
+        }
+
+        _desktop?.Resize(_width, _height);
+        if (_desktop is not null) await SendDesktopAsync(ct);
+        log.LogInformation("Reactivation complete — session ACTIVE at {W}x{H}.", _width, _height);
     }
 
     /// <summary>M6: sends the clipboard capabilities + monitor-ready that start the CLIPRDR exchange.</summary>
@@ -534,6 +593,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     msg.Version, _dvcChannelNames.Length);
                 foreach (var name in _dvcChannelNames)
                     await OpenDvcChannelAsync(name, ct);
+                // In desktop mode, also open the Display Control channel so the client can drive
+                // resolution changes (MS-RDPEDISP). Harmless if the client declines it.
+                if (desktop)
+                    await OpenDvcChannelAsync(DisplayControl.ChannelName, ct);
                 break;
 
             case Dvc.Cmd.Create: // inbound Create is a create RESPONSE
@@ -543,6 +606,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 {
                     _dvcOpen[msg.ChannelId] = name0;
                     log.LogInformation("DVC: channel '{Name}' (id {Id}) opened by client.", name0, msg.ChannelId);
+                    if (name0 == DisplayControl.ChannelName)
+                    {
+                        _displayControlId = msg.ChannelId;
+                        foreach (var p in Dvc.BuildData(msg.ChannelId, DisplayControl.BuildCapsPdu()))
+                            await SendDvcAsync(p, ct);
+                        log.LogInformation("Display Control ready on DVC id {Id}: sent caps.", msg.ChannelId);
+                    }
                 }
                 else
                 {
@@ -596,6 +666,19 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             if (acc.Buf.Length < acc.Total) return;
             complete = acc.Buf.ToArray();
             _dvcReasm.Remove(msg.ChannelId);
+        }
+
+        // Display Control (MS-RDPEDISP): a MONITOR_LAYOUT PDU asks for a resolution change.
+        // Don't echo it — record the requested size; the serve loop performs the reactivation.
+        if (msg.ChannelId == _displayControlId)
+        {
+            var size = DisplayControl.ParseMonitorLayout(complete);
+            if (size is { } s && (s.Width != _width || s.Height != _height))
+            {
+                _pendingResize = s;
+                log.LogInformation("Display Control: client requested {W}x{H}.", s.Width, s.Height);
+            }
+            return;
         }
 
         var name = _dvcOpen[msg.ChannelId];
@@ -882,8 +965,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task DrawMarkerAsync(ushort x, ushort y, CancellationToken ct)
     {
         const int size = 16;
-        int mx = Math.Clamp((int)x, 0, Capabilities.DesktopWidth - size);
-        int my = Math.Clamp((int)y, 0, Capabilities.DesktopHeight - size);
+        int mx = Math.Clamp((int)x, 0, _width - size);
+        int my = Math.Clamp((int)y, 0, _height - size);
         var square = new Graphics.Square(mx, my, size, Graphics.Rgb565(255, 255, 0)); // yellow
         await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
     }

@@ -20,8 +20,8 @@ public enum DesktopKind { Default, Secure, Logon }
 /// </summary>
 public sealed class FakeDesktop : IDisposable
 {
-    public int Width { get; }
-    public int Height { get; }
+    public int Width { get; private set; }
+    public int Height { get; private set; }
     public DesktopKind Active { get; set; } = DesktopKind.Default;
     public bool StartMenuOpen { get; set; }
     public int WindowCount => _windows.Count;
@@ -74,8 +74,8 @@ public sealed class FakeDesktop : IDisposable
     private readonly VfsNode _vfsRoot;
     private readonly VfsNode _vfsHome;
 
-    private readonly Image<Rgba32> _fb;
-    private readonly Image<Rgba32> _wallpaper;   // pre-rendered gradient (recomputing it per frame is slow)
+    private Image<Rgba32> _fb;
+    private Image<Rgba32> _wallpaper;   // pre-rendered gradient (recomputing it per frame is slow)
     private readonly Font? _font;
     private readonly Font? _small;
     private ulong[]? _tileHash;
@@ -105,15 +105,42 @@ public sealed class FakeDesktop : IDisposable
         Height = height;
         Active = logon ? DesktopKind.Logon : DesktopKind.Default;
         _fb = new Image<Rgba32>(width, height);
-        _wallpaper = new Image<Rgba32>(width, height);
-        _wallpaper.Mutate(ctx => ctx.Fill(new LinearGradientBrush(
-            new PointF(0, 0), new PointF(0, height), GradientRepetitionMode.None,
-            new ColorStop(0f, Color.ParseHex("103A6B")), new ColorStop(1f, Color.ParseHex("2B6AB0")))));
+        _wallpaper = BuildWallpaper(width, height);
         _font = TryLoadFont(15);
         _small = TryLoadFont(12);
         _vfsRoot = Vfs.BuildDefault();
         _vfsHome = Vfs.Home(_vfsRoot);
         _windows.Add(new Win { Id = _nextWinId++, Title = "Welcome to mock-rdp", Body = "Open File Explorer to browse C:\\ or \\\\tsclient (your files), drag windows, Ctrl+Alt+End for the secure desktop.", X = 130, Y = 90, W = 560, H = 300 });
+        Render();
+    }
+
+    private static Image<Rgba32> BuildWallpaper(int width, int height)
+    {
+        var img = new Image<Rgba32>(width, height);
+        img.Mutate(ctx => ctx.Fill(new LinearGradientBrush(
+            new PointF(0, 0), new PointF(0, height), GradientRepetitionMode.None,
+            new ColorStop(0f, Color.ParseHex("103A6B")), new ColorStop(1f, Color.ParseHex("2B6AB0")))));
+        return img;
+    }
+
+    /// <summary>Changes the framebuffer size (a resolution change / Deactivation-Reactivation).
+    /// Rebuilds the wallpaper, keeps windows on-screen, and forces a full-frame resend.</summary>
+    public void Resize(int width, int height)
+    {
+        if (width == Width && height == Height) return;
+        Width = width;
+        Height = height;
+        _fb.Dispose();
+        _wallpaper.Dispose();
+        _fb = new Image<Rgba32>(width, height);
+        _wallpaper = BuildWallpaper(width, height);
+        _tileHash = null;                       // grid size changed → next DirtyTiles resends everything
+        _drag = null;
+        foreach (var w in _windows)
+        {
+            w.X = Math.Clamp(w.X, -w.W + 80, Math.Max(0, width - 80));
+            w.Y = Math.Clamp(w.Y, 0, Math.Max(0, height - Taskbar - TitleH));
+        }
         Render();
     }
 
