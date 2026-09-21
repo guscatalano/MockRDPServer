@@ -591,15 +591,46 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 if (!_offeredServerClipboard)
                 {
                     _offeredServerClipboard = true;
-                    await SendClipboardAsync(Clipboard.FormatListUnicodeText(), ct);
-                    log.LogInformation("Clipboard: acked client format list and offered CF_UNICODETEXT.");
+                    await SendClipboardAsync(Clipboard.FormatListWithFile(), ct);
+                    log.LogInformation("Clipboard: offered CF_UNICODETEXT + a file ({File}).", Clipboard.ServedFileName);
                 }
                 break;
 
             case Clipboard.CbFormatDataRequest:
-                await SendClipboardAsync(Clipboard.FormatDataResponseText(Clipboard.ServedText), ct);
-                log.LogInformation("Clipboard: served text on format data request.");
+                if (Clipboard.ReadFormatDataRequestId(clipPdu) == Clipboard.FileGroupDescriptorId)
+                {
+                    await SendClipboardAsync(Clipboard.FormatDataResponseFileList(Clipboard.ServedFileName, Clipboard.ServedFileBytes.Length), ct);
+                    log.LogInformation("Clipboard: served file descriptor for '{File}' ({Size} bytes).",
+                        Clipboard.ServedFileName, Clipboard.ServedFileBytes.Length);
+                }
+                else
+                {
+                    await SendClipboardAsync(Clipboard.FormatDataResponseText(Clipboard.ServedText), ct);
+                    log.LogInformation("Clipboard: served text on format data request.");
+                }
                 break;
+
+            case Clipboard.CbFilecontentsRequest:
+            {
+                var req = Clipboard.ReadFilecontentsRequest(clipPdu);
+                if (req.WantSize)
+                {
+                    await SendClipboardAsync(Clipboard.FilecontentsResponse(req.StreamId,
+                        BitConverter.GetBytes((ulong)Clipboard.ServedFileBytes.Length)), ct);
+                    log.LogInformation("Clipboard: served file size ({Size}) for stream {Stream}.",
+                        Clipboard.ServedFileBytes.Length, req.StreamId);
+                }
+                else
+                {
+                    int start = (int)Math.Min(req.Position, (ulong)Clipboard.ServedFileBytes.Length);
+                    int len = (int)Math.Min(req.Length, (uint)(Clipboard.ServedFileBytes.Length - start));
+                    await SendClipboardAsync(Clipboard.FilecontentsResponse(req.StreamId,
+                        Clipboard.ServedFileBytes.AsSpan(start, len)), ct);
+                    log.LogInformation("Clipboard: served file bytes [{Start}..{End}) for stream {Stream}.",
+                        start, start + len, req.StreamId);
+                }
+                break;
+            }
 
             case Clipboard.CbClipCaps:
                 log.LogDebug("Clipboard: client capabilities received.");
