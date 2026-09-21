@@ -68,7 +68,7 @@ public class ResolutionChangeTests
         // menu to open Display settings and pick 1280x720 — a purely server-side trigger.
         await ClickAsync(client, 360, 425, ct);   // Sign in  → desktop
         await ClickAsync(client, 10, 748, ct);    // Start
-        await ClickAsync(client, 20, 590, ct);    // Display settings (4th menu item)
+        await ClickAsync(client, 20, 555, ct);    // Display settings (4th menu item)
         await ClickAsync(client, 210, 244, ct);   // resolution row: 1280x720
 
         // The server initiates a Deactivation-Reactivation on its own.

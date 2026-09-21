@@ -29,7 +29,7 @@ public sealed class FakeDesktop : IDisposable
     public string FocusedText => Focused?.Body ?? "";
     public bool IsDragging => _drag is not null;
 
-    private enum WinKind { Generic, Explorer, Notepad, Run, Stats, Display, DvcMon }
+    private enum WinKind { Generic, Explorer, Notepad, Run, Stats, Display, DvcMon, DvcApp }
 
     private sealed class Win
     {
@@ -42,6 +42,8 @@ public sealed class FakeDesktop : IDisposable
         public List<(string Name, bool IsDir)>? ClientEntries;    // client listing
         public bool Loading;                                      // waiting on an rdpdr result
         public int Scroll;                                        // Explorer: first visible row
+        public string DvcChannel = "APP";                         // DvcApp: the channel name to send on
+        public bool DvcFocusChannel;                              // DvcApp: channel field vs message field
         public int X, Y, W, H;
     }
 
@@ -66,8 +68,22 @@ public sealed class FakeDesktop : IDisposable
     /// faster and keeps its contents fresh.</summary>
     public bool WantsLiveTick => _windows.Any(w => w.Kind is WinKind.Stats or WinKind.DvcMon);
 
-    /// <summary>True while a DVC Monitor is open, so the host emits heartbeat traffic to visualise.</summary>
-    public bool WantsDvcHeartbeat => _windows.Any(w => w.Kind == WinKind.DvcMon);
+    /// <summary>True while a DVC Monitor is open, so the host repaints it as traffic is logged.</summary>
+    public bool HasDvcMonitor => _windows.Any(w => w.Kind == WinKind.DvcMon);
+
+    /// <summary>Messages the user typed into a DVC Console: (channel, text) the host should open
+    /// the channel for and send, generating real DVC traffic. Read-and-clear.</summary>
+    private readonly List<(string Channel, string Text)> _dvcSends = new();
+    public IReadOnlyList<(string Channel, string Text)> TakeDvcSends()
+    {
+        if (_dvcSends.Count == 0) return [];
+        var copy = _dvcSends.ToArray();
+        _dvcSends.Clear();
+        return copy;
+    }
+
+    /// <summary>Opens a Start-menu app by name (used by tests/screenshots to avoid pixel math).</summary>
+    public void OpenApp(string app) => Launch(app);
 
     /// <summary>A resolution the user picked in Display settings. The host reads and clears it and
     /// applies it as a server-initiated Deactivation-Reactivation (no client MONITOR_LAYOUT).</summary>
@@ -101,7 +117,7 @@ public sealed class FakeDesktop : IDisposable
     private const int TitleH = 30;
     private const int CloseW = 30;
     private const int StartW = 92;
-    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "DVC Monitor", "Settings", "Run…"];
+    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "DVC Monitor", "DVC Console", "Settings", "Run…"];
     private const int MenuW = 240;
     private const int MenuRow = 36;
 
@@ -252,6 +268,33 @@ public sealed class FakeDesktop : IDisposable
         }
         if (Active == DesktopKind.Secure) return false;
 
+        // DVC Console: type a channel + message; Tab switches fields, Enter sends on the channel.
+        if (Focused is { Kind: WinKind.DvcApp } dvc)
+        {
+            if (scancode == 0x0F) { dvc.DvcFocusChannel = !dvc.DvcFocusChannel; return true; }  // Tab
+            if (scancode == Keys.Enter)
+            {
+                if (dvc.Body.Length > 0)
+                {
+                    _dvcSends.Add((string.IsNullOrWhiteSpace(dvc.DvcChannel) ? "APP" : dvc.DvcChannel.Trim(), dvc.Body));
+                    dvc.Body = "";
+                }
+                return true;
+            }
+            if (scancode == Keys.Backspace)
+            {
+                if (dvc.DvcFocusChannel) { if (dvc.DvcChannel.Length > 0) dvc.DvcChannel = dvc.DvcChannel[..^1]; }
+                else { if (dvc.Body.Length > 0) dvc.Body = dvc.Body[..^1]; }
+                return true;
+            }
+            if (Keys.ScancodeToChar(scancode, _shift) is { } dc)
+            {
+                if (dvc.DvcFocusChannel) dvc.DvcChannel += dc; else dvc.Body += dc;
+                return true;
+            }
+            return false;
+        }
+
         // Text into the focused editable window.
         var f = Focused;
         if (f is null || (f.Kind != WinKind.Notepad && f.Kind != WinKind.Run)) return false;
@@ -338,7 +381,8 @@ public sealed class FakeDesktop : IDisposable
                 bool raised = Raise(i);
                 if (ScrollbarHit(w, x, y)) { _scrollbarDrag = w; ScrollbarSetFromY(w, y); return true; }
                 bool acted = (w.Kind == WinKind.Explorer && ExplorerClick(w, x, y))
-                          || (w.Kind == WinKind.Display && DisplayClick(w, x, y));
+                          || (w.Kind == WinKind.Display && DisplayClick(w, x, y))
+                          || (w.Kind == WinKind.DvcApp && DvcAppClick(w, x, y));
                 return raised || acted;
             }
         }
@@ -473,6 +517,7 @@ public sealed class FakeDesktop : IDisposable
             case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 560, H = 440 }); break;
             case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
             case "DVC Monitor": Open(new Win { Kind = WinKind.DvcMon, Title = "DVC Monitor — live channel traffic", W = 600, H = 380 }); break;
+            case "DVC Console": Open(new Win { Kind = WinKind.DvcApp, Title = "DVC Console — send on a channel", W = 440, H = 230 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
         }
@@ -573,6 +618,7 @@ public sealed class FakeDesktop : IDisposable
             case WinKind.Stats: DrawStats(ctx, w); break;
             case WinKind.Display: DrawDisplay(ctx, w); break;
             case WinKind.DvcMon: DrawDvcMon(ctx, w); break;
+            case WinKind.DvcApp: DrawDvcApp(ctx, w, focused); break;
             default:
             {
                 int ly = w.Y + TitleH + 18;
@@ -648,6 +694,33 @@ public sealed class FakeDesktop : IDisposable
             Text(ctx, _small, line, w.X + 14, yy, color);
             yy += lineH;
         }
+    }
+
+    private static int[] DvcField(Win w, bool channel) =>
+        [w.X + 14, w.Y + TitleH + (channel ? 30 : 82), w.W - 28, 26];
+
+    private bool DvcAppClick(Win w, int x, int y)
+    {
+        if (InRect(x, y, DvcField(w, true))) { w.DvcFocusChannel = true; return true; }
+        if (InRect(x, y, DvcField(w, false))) { w.DvcFocusChannel = false; return true; }
+        return false;
+    }
+
+    private void DrawDvcApp(IImageProcessingContext ctx, Win w, bool focused)
+    {
+        Fill(ctx, "FFFFFF", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
+        Text(ctx, _small, "Channel name", w.X + 14, w.Y + TitleH + 12, Color.ParseHex("505050"));
+        var cf = DvcField(w, true);
+        Fill(ctx, "EDEDED", cf[0], cf[1], cf[2], cf[3]);
+        Text(ctx, _small, w.DvcChannel + (focused && w.DvcFocusChannel ? "_" : ""), cf[0] + 6, cf[1] + 5, Color.ParseHex("101010"));
+
+        Text(ctx, _small, "Message  (Enter = send · Tab = switch field)", w.X + 14, w.Y + TitleH + 64, Color.ParseHex("505050"));
+        var mf = DvcField(w, false);
+        Fill(ctx, "EDEDED", mf[0], mf[1], mf[2], mf[3]);
+        Text(ctx, _small, w.Body + (focused && !w.DvcFocusChannel ? "_" : ""), mf[0] + 6, mf[1] + 5, Color.ParseHex("101010"));
+
+        Text(ctx, _small, "Opens a dynamic virtual channel of that name and sends your text.", w.X + 14, w.Y + TitleH + 118, Color.ParseHex("707070"));
+        Text(ctx, _small, "Open DVC Monitor to watch it flow.", w.X + 14, w.Y + TitleH + 136, Color.ParseHex("707070"));
     }
 
     private void DrawStats(IImageProcessingContext ctx, Win w)

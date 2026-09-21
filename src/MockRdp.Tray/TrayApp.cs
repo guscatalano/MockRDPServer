@@ -44,6 +44,7 @@ internal sealed class TrayApp : IDisposable
     }
 
     private readonly Redir _redir = new();
+    private bool _nla;   // request NLA (HYBRID) in the .rdp; off by default (the mock is TLS-only)
 
     public TrayApp()
     {
@@ -84,6 +85,11 @@ internal sealed class TrayApp : IDisposable
         AddRedir("COM ports", () => _redir.ComPorts, v => _redir.ComPorts = v);
         AddRedir("Audio", () => _redir.Audio, v => _redir.Audio = v);
         _menu.Items.Add(redir);
+
+        var nla = new ToolStripMenuItem("Request NLA (server auth)") { CheckOnClick = true, Checked = _nla };
+        nla.CheckedChanged += (_, _) => _nla = nla.Checked;
+        nla.ToolTipText = "The mock is TLS-only; with NLA on, mstsc will warn it can't authenticate.";
+        _menu.Items.Add(nla);
 
         _menu.Items.Add(new ToolStripMenuItem("Save .rdp to Desktop", null, (_, _) => SaveRdpToDesktop()));
         _menu.Items.Add(new ToolStripSeparator());
@@ -151,7 +157,7 @@ internal sealed class TrayApp : IDisposable
         var sb = new StringBuilder();
         sb.AppendLine($"full address:s:127.0.0.1:{Port}");
         sb.AppendLine("authentication level:i:2");
-        sb.AppendLine("enablecredsspsupport:i:0");
+        sb.AppendLine($"enablecredsspsupport:i:{(_nla ? 1 : 0)}");
         sb.AppendLine("prompt for credentials:i:0");
         sb.AppendLine("screen mode id:i:1");
         sb.AppendLine($"desktopwidth:i:{p.Width}");

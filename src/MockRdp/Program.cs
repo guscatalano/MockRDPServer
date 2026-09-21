@@ -46,15 +46,14 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
             ("Open DVCs", "ECHO #1"),
             ("Redirected drives", "C:, D:"),
         ];
-        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 555)); // Start → Connection Info
+        shot.OpenApp("Connection Info");
     }
     if (args.Contains("--scroll"))
     {
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
         InputEvent Move(ushort x, ushort y) => new(InputEventType.Mouse, Input.PtrFlagsMove, x, y, 0);
         InputEvent Up(ushort x, ushort y) => new(InputEventType.Mouse, Input.PtrFlagsButton1, x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 484));  // Start → File Explorer
+        shot.OpenApp("File Explorer");
         shot.OnInput(Click(250, 226)); shot.OnInput(Click(250, 226)); // .. → Users → C:
         shot.OnInput(Click(250, 248)); shot.OnInput(Click(250, 248)); // Windows → System32 (overflows)
         if (!args.Contains("--top"))
@@ -65,15 +64,14 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
     }
     if (args.Contains("--display"))
     {
-        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 590)); // Start → Display
+        shot.OpenApp("Display");
     }
     if (args.Contains("--tsclient"))
     {
         // Simulate browsing \\tsclient with no redirected drives (delivers an empty listing).
         shot.OnClientList = (winId, path) => shot.DeliverClientList(winId, path, new List<(string, bool)>());
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 484)); // Start → File Explorer
+        shot.OpenApp("File Explorer");
         shot.OnInput(Click(210, 196));                              // click the \\tsclient row (top)
     }
     if (args.Contains("--dvcmon"))
@@ -91,22 +89,26 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
             "20:31:22 ← ECHO · 13B · data",
             "20:31:22 → ECHO · 13B · echo",
         ];
-        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 625)); // Start → DVC Monitor
+        shot.OpenApp("DVC Monitor");
+    }
+    if (args.Contains("--dvcapp"))
+    {
+        InputEvent K(byte sc) => new(InputEventType.Scancode, 0, 0, 0, sc);
+        shot.OpenApp("DVC Console");
+        foreach (var sc in new byte[] { 0x23, 0x17, 0x1F }) shot.OnInput(K(sc)); // type "his" into the message
     }
     if (args.Contains("--demo"))
     {
         // Synthetic clicks: open File Explorer, browse into Documents, open readme.txt in Notepad.
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 574)); // Start → File Explorer
+        shot.OpenApp("File Explorer");
         shot.OnInput(Click(250, 220)); // into Documents
         shot.OnInput(Click(250, 220)); // open readme.txt → Notepad
     }
     if (args.Contains("--demo-run"))
     {
-        InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);
         InputEvent K(byte sc) => new(InputEventType.Scancode, 0, 0, 0, sc);
-        shot.OnInput(Click(10, 748)); shot.OnInput(Click(20, 690));   // Start → Run…
+        shot.OpenApp("Run…");
         foreach (var sc in new byte[] { 0x31, 0x18, 0x14, 0x12, 0x19, 0x1E, 0x20 }) shot.OnInput(K(sc)); // "notepad"
     }
     shot.Render();

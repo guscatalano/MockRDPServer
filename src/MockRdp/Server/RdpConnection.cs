@@ -50,6 +50,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private readonly Dictionary<uint, string> _dvcPending = new();    // id -> name (create sent)
     private readonly Dictionary<uint, (int Total, ByteWriter Buf)> _dvcReasm = new();
     private readonly List<string> _dvcLog = new();                   // live feed for the DVC Monitor window
+    private readonly Dictionary<string, List<string>> _dvcPendingSends = new(StringComparer.Ordinal); // console msgs awaiting channel open
+    private readonly HashSet<uint> _consoleChannels = new();         // DVC Console channels — don't echo their data
 
     // Records one line of dynamic-virtual-channel traffic for the desktop's DVC Monitor.
     // dir: "←" inbound (client -> server), "→" outbound (server -> client).
@@ -57,6 +59,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     {
         _dvcLog.Add($"{DateTime.Now:HH:mm:ss} {dir} {channel} · {bytes}B · {note}");
         if (_dvcLog.Count > 300) _dvcLog.RemoveRange(0, _dvcLog.Count - 300);
+        if (_desktop?.HasDvcMonitor == true) _desktopNeedsSend = true;   // repaint the monitor live
     }
     private readonly Dictionary<string, Dvc.Behavior> _dvcBehaviors = dvcBehaviors ?? new();
     private uint _nextDvcId = 1;
@@ -461,7 +464,6 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
             if (completed != pending)
             {
-                if (_desktop?.WantsDvcHeartbeat == true) await SendDvcHeartbeatAsync(ct);
                 if (_desktop is not null) { _desktop.Render(); await SendDesktopAsync(ct); }
                 continue; // input read is still pending
             }
@@ -693,6 +695,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                         LogDvc("→", "DisplayControl", caps.Length, "caps PDU");
                         log.LogInformation("Display Control ready on DVC id {Id}: sent caps.", msg.ChannelId);
                     }
+                    else if (_dvcPendingSends.Remove(name0, out var queued))
+                    {
+                        // A DVC Console channel just opened — flush the queued messages, and don't echo its data.
+                        _consoleChannels.Add(msg.ChannelId);
+                        foreach (var text in queued)
+                            await SendDvcTextAsync(msg.ChannelId, name0, text, ct);
+                    }
                 }
                 else
                 {
@@ -715,6 +724,32 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 _dvcReasm.Remove(msg.ChannelId);
                 break;
         }
+    }
+
+    /// <summary>Sends a DVC Console message on the named channel, opening it first if needed.</summary>
+    private async Task SendDvcConsoleAsync(string channel, string text, CancellationToken ct)
+    {
+        var open = _dvcOpen.FirstOrDefault(o => o.Value == channel);
+        if (open.Value == channel) { await SendDvcTextAsync(open.Key, channel, text, ct); return; }
+
+        // Not open yet: queue the message and open the channel; the create response flushes the queue.
+        if (!_dvcPendingSends.TryGetValue(channel, out var q))
+        {
+            q = new List<string>();
+            _dvcPendingSends[channel] = q;
+            await OpenDvcChannelAsync(channel, ct);
+        }
+        q.Add(text);
+    }
+
+    private async Task SendDvcTextAsync(uint channelId, string channel, string text, CancellationToken ct)
+    {
+        var payload = System.Text.Encoding.UTF8.GetBytes(text);
+        foreach (var p in Dvc.BuildData(channelId, payload))
+            await SendDvcAsync(p, ct);
+        var preview = text.Length > 24 ? text[..24] + "…" : text;
+        LogDvc("→", DvcLabel(channel), payload.Length, $"console: \"{preview}\"");
+        log.LogInformation("DVC console: sent {Count} bytes on '{Channel}'.", payload.Length, channel);
     }
 
     private async Task OpenDvcChannelAsync(string name, CancellationToken ct)
@@ -768,6 +803,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             return;
         }
 
+        // Data the client sends back on a DVC Console channel: show it, but don't echo (avoid loops).
+        if (_consoleChannels.Contains(msg.ChannelId))
+        {
+            LogDvc("←", DvcLabel(_dvcOpen[msg.ChannelId]), complete.Length, "data (from client)");
+            return;
+        }
+
         var name = _dvcOpen[msg.ChannelId];
         LogDvc("←", DvcLabel(name), complete.Length, "data");
         var behavior = _dvcBehaviors.GetValueOrDefault(name);
@@ -809,19 +851,6 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>
         WriteAsync(McsPdu.BuildSendDataIndication(_drdynvcChannelId, VirtualChannel.Wrap(dvcPdu)), ct);
 
-    private int _heartbeatSeq;
-
-    /// <summary>Pushes a small heartbeat on an open DVC so the DVC Monitor shows live traffic
-    /// (mstsc has no plugin listening, so it just drops it — the point is to visualise the channel).</summary>
-    private async Task SendDvcHeartbeatAsync(CancellationToken ct)
-    {
-        var ch = _dvcOpen.FirstOrDefault(o => o.Value != DisplayControl.ChannelName);
-        if (ch.Value is null) return;   // no ordinary DVC open
-        var payload = System.Text.Encoding.ASCII.GetBytes($"heartbeat #{++_heartbeatSeq}");
-        foreach (var p in Dvc.BuildData(ch.Key, payload))
-            await SendDvcAsync(p, ct);
-        LogDvc("→", DvcLabel(ch.Value), payload.Length, $"heartbeat #{_heartbeatSeq}");
-    }
 
     // ── Drive redirection (MS-RDPEFS / rdpdr) ───────────────────────────────
 
@@ -1058,6 +1087,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // The user picked a resolution in Display settings — schedule a server-initiated
         // Deactivation-Reactivation (the serve loop applies it after this input returns).
         if (_desktop.TakeRequestedResize() is { } r) _pendingResize = r;
+
+        // The user typed into a DVC Console — open the channel (if needed) and send the text.
+        foreach (var (channel, text) in _desktop.TakeDvcSends())
+            await SendDvcConsoleAsync(channel, text, ct);
 
         // The user just signed in at the logon screen — send the Server Save Session Info
         // ("logon") PDU (MS-RDPBCGR 2.2.10.1) before painting the desktop, as a real host would.
