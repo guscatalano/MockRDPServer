@@ -11,7 +11,7 @@ namespace MockRdp.Tray;
 
 /// <summary>
 /// A system-tray command &amp; control for the mock RDP server: hosts the server in-process and
-/// launches Remote Desktop against it with a chosen preset (resolution, drive redirection).
+/// launches Remote Desktop against it with a chosen resolution and a set of redirections.
 /// </summary>
 internal sealed class TrayApp : IDisposable
 {
@@ -27,16 +27,23 @@ internal sealed class TrayApp : IDisposable
 
     private bool Running => _listener is not null;
 
-    private sealed record Preset(string Label, int Width, int Height, bool DriveRedirect);
+    private sealed record Preset(string Label, int Width, int Height);
 
     private static readonly Preset[] Presets =
     [
-        new("Default — 1024 × 768", 1024, 768, false),
-        new("1280 × 800", 1280, 800, false),
-        new("1440 × 900", 1440, 900, false),
-        new("1920 × 1080", 1920, 1080, false),
-        new("1024 × 768 + drive redirect", 1024, 768, true),
+        new("Default — 1024 × 768", 1024, 768),
+        new("1280 × 800", 1280, 800),
+        new("1440 × 900", 1440, 900),
+        new("1920 × 1080", 1920, 1080),
     ];
+
+    // Which resources the generated .rdp asks mstsc to redirect. All on by default.
+    private sealed class Redir
+    {
+        public bool Drives = true, Clipboard = true, Printers = true, SmartCards = true, ComPorts = true, Audio = true;
+    }
+
+    private readonly Redir _redir = new();
 
     public TrayApp()
     {
@@ -45,7 +52,7 @@ internal sealed class TrayApp : IDisposable
         _icon.ContextMenuStrip = _menu;
         _icon.DoubleClick += (_, _) => Connect(Presets[0]);
         StartServer();
-        Balloon("Mock RDP is running on 127.0.0.1:" + Port + ". Right-click the tray icon to connect.");
+        Balloon($"Mock RDP is running on 127.0.0.1:{Port}. Right-click the tray icon to connect.");
     }
 
     private void BuildMenu()
@@ -61,6 +68,22 @@ internal sealed class TrayApp : IDisposable
         foreach (var preset in Presets)
             connect.DropDownItems.Add(new ToolStripMenuItem(preset.Label, null, (_, _) => Connect(preset)));
         _menu.Items.Add(connect);
+
+        // Redirections included in the .rdp — each is a live checkbox, all ticked by default.
+        var redir = new ToolStripMenuItem("Redirections (written to the .rdp)");
+        void AddRedir(string label, Func<bool> get, Action<bool> set)
+        {
+            var item = new ToolStripMenuItem(label) { CheckOnClick = true, Checked = get() };
+            item.CheckedChanged += (_, _) => set(item.Checked);
+            redir.DropDownItems.Add(item);
+        }
+        AddRedir(@"Drives (\\tsclient)", () => _redir.Drives, v => _redir.Drives = v);
+        AddRedir("Clipboard", () => _redir.Clipboard, v => _redir.Clipboard = v);
+        AddRedir("Printers", () => _redir.Printers, v => _redir.Printers = v);
+        AddRedir("Smart cards", () => _redir.SmartCards, v => _redir.SmartCards = v);
+        AddRedir("COM ports", () => _redir.ComPorts, v => _redir.ComPorts = v);
+        AddRedir("Audio", () => _redir.Audio, v => _redir.Audio = v);
+        _menu.Items.Add(redir);
 
         _menu.Items.Add(new ToolStripMenuItem("Save .rdp to Desktop", null, (_, _) => SaveRdpToDesktop()));
         _menu.Items.Add(new ToolStripSeparator());
@@ -113,8 +136,8 @@ internal sealed class TrayApp : IDisposable
         {
             var rdp = WriteRdp(preset);
             Process.Start(new ProcessStartInfo("mstsc.exe", $"\"{rdp}\"") { UseShellExecute = true });
-            if (preset.DriveRedirect)
-                Balloon("mstsc will warn about sharing your drives — click Connect to allow \\\\tsclient.");
+            if (_redir.Drives)
+                Balloon("mstsc will warn about sharing your resources — click Connect to allow them.");
         }
         catch (Exception ex)
         {
@@ -123,7 +146,7 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
-    private static string Rdp(Preset p)
+    private string Rdp(Preset p)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"full address:s:127.0.0.1:{Port}");
@@ -135,11 +158,16 @@ internal sealed class TrayApp : IDisposable
         sb.AppendLine($"desktopheight:i:{p.Height}");
         sb.AppendLine("dynamic resolution:i:1");
         sb.AppendLine("smart sizing:i:0");
-        if (p.DriveRedirect) sb.AppendLine("drivestoredirect:s:*");
+        if (_redir.Drives) sb.AppendLine("drivestoredirect:s:*");
+        sb.AppendLine($"redirectclipboard:i:{(_redir.Clipboard ? 1 : 0)}");
+        sb.AppendLine($"redirectprinters:i:{(_redir.Printers ? 1 : 0)}");
+        sb.AppendLine($"redirectsmartcards:i:{(_redir.SmartCards ? 1 : 0)}");
+        sb.AppendLine($"redirectcomports:i:{(_redir.ComPorts ? 1 : 0)}");
+        sb.AppendLine($"audiomode:i:{(_redir.Audio ? 0 : 2)}");   // 0 = play on this computer (redirect), 2 = do not play
         return sb.ToString();
     }
 
-    private static string WriteRdp(Preset p)
+    private string WriteRdp(Preset p)
     {
         var path = Path.Combine(Path.GetTempPath(), "mock-rdp-tray.rdp");
         File.WriteAllText(path, Rdp(p), Encoding.ASCII);   // mstsc wants ASCII
