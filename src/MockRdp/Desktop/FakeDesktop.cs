@@ -66,6 +66,9 @@ public sealed class FakeDesktop : IDisposable
     /// faster and keeps its contents fresh.</summary>
     public bool WantsLiveTick => _windows.Any(w => w.Kind is WinKind.Stats or WinKind.DvcMon);
 
+    /// <summary>True while a DVC Monitor is open, so the host emits heartbeat traffic to visualise.</summary>
+    public bool WantsDvcHeartbeat => _windows.Any(w => w.Kind == WinKind.DvcMon);
+
     /// <summary>A resolution the user picked in Display settings. The host reads and clears it and
     /// applies it as a server-initiated Deactivation-Reactivation (no client MONITOR_LAYOUT).</summary>
     private (int W, int H)? _requestedResize;

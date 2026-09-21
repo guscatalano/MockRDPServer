@@ -461,6 +461,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
             if (completed != pending)
             {
+                if (_desktop?.WantsDvcHeartbeat == true) await SendDvcHeartbeatAsync(ct);
                 if (_desktop is not null) { _desktop.Render(); await SendDesktopAsync(ct); }
                 continue; // input read is still pending
             }
@@ -776,6 +777,20 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
     private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>
         WriteAsync(McsPdu.BuildSendDataIndication(_drdynvcChannelId, VirtualChannel.Wrap(dvcPdu)), ct);
+
+    private int _heartbeatSeq;
+
+    /// <summary>Pushes a small heartbeat on an open DVC so the DVC Monitor shows live traffic
+    /// (mstsc has no plugin listening, so it just drops it — the point is to visualise the channel).</summary>
+    private async Task SendDvcHeartbeatAsync(CancellationToken ct)
+    {
+        var ch = _dvcOpen.FirstOrDefault(o => o.Value != DisplayControl.ChannelName);
+        if (ch.Value is null) return;   // no ordinary DVC open
+        var payload = System.Text.Encoding.ASCII.GetBytes($"heartbeat #{++_heartbeatSeq}");
+        foreach (var p in Dvc.BuildData(ch.Key, payload))
+            await SendDvcAsync(p, ct);
+        LogDvc("→", DvcLabel(ch.Value), payload.Length, $"heartbeat #{_heartbeatSeq}");
+    }
 
     // ── Drive redirection (MS-RDPEFS / rdpdr) ───────────────────────────────
 
