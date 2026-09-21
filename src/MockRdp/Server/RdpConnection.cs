@@ -492,9 +492,11 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         while (!ct.IsCancellationRequested)
         {
             pending ??= ReadFrameAsync(ct);
-            // Tick faster while the Connection Info window is open so its live stats stay fresh;
-            // dirty-rect rendering keeps each idle tick to just the changed tiles.
-            var tick = _desktop?.WantsLiveTick == true ? TimeSpan.FromSeconds(1) : TimeSpan.FromSeconds(20);
+            // Tick fast (~13 fps) while a live window (Channel/Connection Monitor) is open so the
+            // feed stays smooth even between traffic events; otherwise idle at 20s just for the clock.
+            // Dirty-rect keeps each idle tick to only the changed tiles, so an unchanged frame sends
+            // nothing.
+            var tick = _desktop?.WantsLiveTick == true ? TimeSpan.FromMilliseconds(75) : TimeSpan.FromSeconds(20);
             var completed = await Task.WhenAny(pending, Task.Delay(tick, ct));
             if (ct.IsCancellationRequested) return;
 
@@ -853,6 +855,23 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
 
         var name = _dvcOpen[msg.ChannelId];
+
+        // RDPeek diagnostics channels: be a real protocol peer (Hello→Capabilities, Ping→Ping)
+        // instead of echoing, so the plugin's handshake actually completes.
+        if (name.StartsWith("dvc::diag::", StringComparison.Ordinal))
+        {
+            LogChannel(name, true, complete.Length, "diag request");
+            var diagReply = DiagResponder.Respond(complete);
+            if (diagReply is not null)
+            {
+                foreach (var p in Dvc.BuildData(msg.ChannelId, diagReply)) await SendDvcAsync(p, ct);
+                LogChannel(name, false, diagReply.Length, "diag response");
+                log.LogInformation("DVC diag: answered {In}-byte request on '{Name}' with {Out} bytes.",
+                    complete.Length, name, diagReply.Length);
+            }
+            return;
+        }
+
         LogChannel(DvcLabel(name), true, complete.Length, "data");
         var behavior = _dvcBehaviors.GetValueOrDefault(name);
         var fault = behavior?.Fault ?? Dvc.Fault.None;
