@@ -54,6 +54,32 @@ public class ResolutionChangeTests
         Assert.Equal((1280, 960), DemandActiveDesktopSize(demand));
     }
 
+    [Fact]
+    public async Task DisplaySettingsClick_DrivesServerInitiatedReactivation()
+    {
+        using var server = new MockServerFixture(desktop: true);
+        await using var client = new RdpTestClient();
+        var ct = Timeout;
+
+        ushort user = await McsClient.NegotiateThroughChannelJoinAsync(client, server.Endpoint, Channels, ct);
+        await McsClient.ActivateAsync(client, user, ct);
+
+        // The session boots to the logon screen (no NLA). Click through it, then use the Start
+        // menu to open Display settings and pick 1280x720 — a purely server-side trigger.
+        await ClickAsync(client, 360, 425, ct);   // Sign in  → desktop
+        await ClickAsync(client, 10, 748, ct);    // Start
+        await ClickAsync(client, 20, 625, ct);    // Display settings (4th menu item)
+        await ClickAsync(client, 210, 244, ct);   // resolution row: 1280x720
+
+        // The server initiates a Deactivation-Reactivation on its own.
+        await ReadIoShareControlAsync(client, ShareControl.Deactivate & 0x0F, ct);
+        var demand = await ReadIoShareControlAsync(client, ShareControl.DemandActive & 0x0F, ct);
+        Assert.Equal((1280, 720), DemandActiveDesktopSize(demand));
+    }
+
+    private static Task ClickAsync(RdpTestClient client, ushort x, ushort y, CancellationToken ct) =>
+        client.WriteRawAsync(McsClient.BuildFastPathMouse((ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y), ct);
+
     private static async Task<byte[]> ReadIoShareControlAsync(RdpTestClient client, int pduType, CancellationToken ct)
     {
         while (true)
