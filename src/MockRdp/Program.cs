@@ -33,11 +33,17 @@ if (ssIdx >= 0 && ssIdx + 1 < args.Length)
         shot.ConnectionStats = () =>
         [
             ("State", "Active"),
-            ("Security", "TLS (no NLA)"),
+            ("Client address", "127.0.0.1:52193"),
             ("Client user", @"MOCK\rdpuser"),
+            ("Security", "TLS (no NLA)"),
+            ("Resolution", "1024 × 768 @ 16bpp"),
             ("Uptime", "03:12"),
+            ("Share id", "0x000103EA"),
             ("Static channels", "rdpdr, rdpsnd, cliprdr, drdynvc"),
-            ("Dynamic channels", "ECHO #1"),
+            ("Clipboard", "on (channel 1006)"),
+            ("Drive redir (rdpdr)", "on (channel 1004)"),
+            ("Dynamic VC", "on (channel 1007, v3)"),
+            ("Open DVCs", "ECHO #1"),
             ("Redirected drives", "C:, D:"),
         ];
         InputEvent Click(ushort x, ushort y) => new(InputEventType.Mouse, (ushort)(Input.PtrFlagsDown | Input.PtrFlagsButton1), x, y, 0);

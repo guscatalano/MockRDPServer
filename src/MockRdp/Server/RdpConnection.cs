@@ -27,9 +27,11 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
     // Snapshot state surfaced by the desktop's "Connection Info" window.
     private readonly DateTime _connectedAt = DateTime.Now;
+    private readonly string _clientEndpoint = tcp.Client.RemoteEndPoint?.ToString() ?? "?";
     private IReadOnlyList<string> _requestedChannels = [];
     private string _clientUser = "";
     private string _clientDomain = "";
+    private int _dvcVersion;                         // DRDYNVC capability version the client advertised
 
     // Current desktop resolution (changed by a Display Control resize / Deactivation-Reactivation).
     private int _width = Capabilities.DesktopWidth;
@@ -346,14 +348,22 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             ? Join(_dvcOpen.OrderBy(o => o.Key).Select(o => $"{o.Value} #{o.Key}"), "")
             : Join(_dvcPending.OrderBy(o => o.Key).Select(o => $"{o.Value} #{o.Key} (pending)"), "none open");
 
+        string ChannelState(ushort id, string name) => id == 0 ? "not requested" : $"on (channel {id})";
+
         return
         [
             ("State", State.ToString()),
-            ("Security", _nlaRequested ? "TLS + NLA requested" : "TLS (no NLA)"),
+            ("Client address", _clientEndpoint),
             ("Client user", string.IsNullOrEmpty(who) ? "(none)" : who),
+            ("Security", _nlaRequested ? "TLS + NLA requested" : "TLS (no NLA)"),
+            ("Resolution", $"{_width} × {_height} @ {Capabilities.BitsPerPixel}bpp"),
             ("Uptime", $"{(int)up.TotalMinutes:00}:{up.Seconds:00}"),
+            ("Share id", $"0x{Capabilities.ShareId:X8}"),
             ("Static channels", Join(_requestedChannels, "(none)")),
-            ("Dynamic channels", dvcs),
+            ("Clipboard", ChannelState(_cliprdrChannelId, "cliprdr")),
+            ("Drive redir (rdpdr)", ChannelState(_rdpdrChannelId, "rdpdr")),
+            ("Dynamic VC", _drdynvcChannelId == 0 ? "not requested" : $"on (channel {_drdynvcChannelId}, v{_dvcVersion})"),
+            ("Open DVCs", dvcs),
             ("Redirected drives", Join(_rdpdrDrives.Keys.OrderBy(c => c).Select(c => $"{c}:"), "(none yet)")),
         ];
     }
@@ -605,6 +615,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         switch (msg.Cmd)
         {
             case Dvc.Cmd.Capabilities:
+                _dvcVersion = msg.Version;
                 log.LogInformation("DVC: client capabilities (version {Version}); opening {Count} channel(s).",
                     msg.Version, _dvcChannelNames.Length);
                 foreach (var name in _dvcChannelNames)

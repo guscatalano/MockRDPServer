@@ -124,6 +124,28 @@ public sealed class FakeDesktop : IDisposable
         Render();
     }
 
+    /// <summary>Greedy word-wrap into lines of at most <paramref name="maxChars"/> characters,
+    /// honouring existing line breaks. Char-count based (good enough for the proportional UI font).</summary>
+    private static IEnumerable<string> WrapText(string text, int maxChars)
+    {
+        maxChars = Math.Max(8, maxChars);
+        foreach (var para in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            var line = new System.Text.StringBuilder();
+            foreach (var word in para.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Length > 0 && line.Length + 1 + word.Length > maxChars)
+                {
+                    yield return line.ToString();
+                    line.Clear();
+                }
+                if (line.Length > 0) line.Append(' ');
+                line.Append(word);
+            }
+            yield return line.ToString();
+        }
+    }
+
     private static Image<Rgba32> BuildWallpaper(int width, int height)
     {
         var img = new Image<Rgba32>(width, height);
@@ -441,7 +463,7 @@ public sealed class FakeDesktop : IDisposable
         {
             case "File Explorer": Open(new Win { Kind = WinKind.Explorer, Title = "File Explorer", Folder = _vfsHome, W = 480, H = 320 }); break;
             case "Notepad": Open(new Win { Kind = WinKind.Notepad, Title = "Untitled — Notepad", W = 420, H = 300 }); break;
-            case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 540, H = 340 }); break;
+            case "Connection Info": Open(new Win { Kind = WinKind.Stats, Title = "Connection Info", W = 560, H = 440 }); break;
             case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
@@ -542,7 +564,17 @@ public sealed class FakeDesktop : IDisposable
             case WinKind.Run: DrawRun(ctx, w, focused); break;
             case WinKind.Stats: DrawStats(ctx, w); break;
             case WinKind.Display: DrawDisplay(ctx, w); break;
-            default: Text(ctx, _small, w.Body, w.X + 14, w.Y + TitleH + 18, Color.ParseHex("202020")); break;
+            default:
+            {
+                int ly = w.Y + TitleH + 18;
+                foreach (var line in WrapText(w.Body, (w.W - 28) / 7))
+                {
+                    if (ly > w.Y + w.H - 16) break;
+                    Text(ctx, _small, line, w.X + 14, ly, Color.ParseHex("202020"));
+                    ly += 18;
+                }
+                break;
+            }
         }
 
         // Black window border (drawn last so it sits on top of the content).
@@ -592,13 +624,13 @@ public sealed class FakeDesktop : IDisposable
             Text(ctx, _small, "No connection data.", w.X + 16, w.Y + TitleH + 16, Color.ParseHex("808080"));
             return;
         }
-        int yy = w.Y + TitleH + 18;
-        int labelX = w.X + 18, valueX = w.X + 176;
+        int yy = w.Y + TitleH + 16;
+        int labelX = w.X + 18, valueX = w.X + 186;
         foreach (var (label, value) in rows)
         {
             Text(ctx, _small, label, labelX, yy, Color.ParseHex("606060"));
             Text(ctx, _small, value, valueX, yy, Color.ParseHex("101010"));
-            yy += 32;
+            yy += 27;
         }
     }
 
