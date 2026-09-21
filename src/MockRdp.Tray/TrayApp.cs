@@ -44,7 +44,7 @@ internal sealed class TrayApp : IDisposable
     }
 
     private readonly Redir _redir = new();
-    private bool _nla;   // request NLA (HYBRID) in the .rdp; off by default (the mock is TLS-only)
+    private bool _bootToDesktop;   // skip the fake logon screen and boot straight to the desktop
 
     public TrayApp()
     {
@@ -86,10 +86,11 @@ internal sealed class TrayApp : IDisposable
         AddRedir("Audio", () => _redir.Audio, v => _redir.Audio = v);
         _menu.Items.Add(redir);
 
-        var nla = new ToolStripMenuItem("Request NLA (server auth)") { CheckOnClick = true, Checked = _nla };
-        nla.CheckedChanged += (_, _) => _nla = nla.Checked;
-        nla.ToolTipText = "The mock is TLS-only; with NLA on, mstsc will warn it can't authenticate.";
-        _menu.Items.Add(nla);
+        var boot = new ToolStripMenuItem("Start at the desktop (skip logon)") { CheckOnClick = true, Checked = _bootToDesktop };
+        boot.ToolTipText = "Off: mstsc lands on the mock logon screen. On: it boots straight to the desktop.\n"
+                         + "(The mock is TLS-only and cannot do NLA — real NLA needs your password, so it's not offered.)";
+        boot.CheckedChanged += (_, _) => { _bootToDesktop = boot.Checked; RestartServer(); };
+        _menu.Items.Add(boot);
 
         _menu.Items.Add(new ToolStripMenuItem("Save .rdp to Desktop", null, (_, _) => SaveRdpToDesktop()));
         _menu.Items.Add(new ToolStripSeparator());
@@ -105,10 +106,17 @@ internal sealed class TrayApp : IDisposable
         _cts = new CancellationTokenSource();
         _listener = new RdpListener(IPAddress.Loopback, Port, cert, NullLoggerFactory.Instance,
             dvcChannels: null, rdpdrReads: null, dvcBehaviors: null,
-            rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true);
+            rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
         UpdateStatus();
+    }
+
+    private void RestartServer()
+    {
+        if (!Running) return;   // will pick up the new setting next time it starts
+        StopServer();
+        StartServer();
     }
 
     private void StopServer()
@@ -157,7 +165,7 @@ internal sealed class TrayApp : IDisposable
         var sb = new StringBuilder();
         sb.AppendLine($"full address:s:127.0.0.1:{Port}");
         sb.AppendLine("authentication level:i:2");
-        sb.AppendLine($"enablecredsspsupport:i:{(_nla ? 1 : 0)}");
+        sb.AppendLine("enablecredsspsupport:i:0");   // mock is TLS-only — never request NLA/CredSSP
         sb.AppendLine("prompt for credentials:i:0");
         sb.AppendLine("screen mode id:i:1");
         sb.AppendLine($"desktopwidth:i:{p.Width}");

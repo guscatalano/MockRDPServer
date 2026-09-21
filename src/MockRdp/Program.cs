@@ -185,7 +185,7 @@ if (dvcReplies.Count > 0 || dvcFaults.Count > 0)
 }
 
 using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
-    rdpdrLists, rdpdrWrites, desktop, logon);
+    rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"));
 listener.Start();
 
 using var cts = new CancellationTokenSource();

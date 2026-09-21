@@ -20,7 +20,8 @@ namespace MockRdp.Server;
 public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger log,
     string[]? dvcChannels = null, string[]? rdpdrReads = null,
     Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
-    string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false)
+    string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false,
+    bool desktopDirect = false)
 {
     private bool _nlaRequested;
     private Stream _stream = tcp.GetStream();
@@ -341,7 +342,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     /// <summary>Renders the fake Windows desktop and sends it as bitmap-update tiles.</summary>
     private async Task DrawDesktopAsync(CancellationToken ct)
     {
-        bool showLogon = logon || !_nlaRequested;
+        bool showLogon = !desktopDirect && (logon || !_nlaRequested);
         _desktop = new Desktop.FakeDesktop(_width, _height, showLogon)
         {
             OnClientList = RequestClientList,
