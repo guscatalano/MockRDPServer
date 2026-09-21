@@ -3,8 +3,12 @@
 A hand-rolled **mock RDP server** in C#/.NET 10, built from the Microsoft Open
 Specifications (MS-RDPBCGR et al.) as a **local test fixture** — so tooling that connects
 to RDP servers can be exercised without a real Windows box. Acceptance clients: **mstsc**
-and **FreeRDP**. Built incrementally, milestone by milestone; see
-`../../.claude/plans/witty-mapping-magpie.md` for the full plan.
+and **FreeRDP**.
+
+![The mock's software-rendered fake desktop with the Start menu open](docs/img/desktop-start.png)
+
+> Every screenshot in this README is a real frame the server renders — reproduce any of them
+> with `MockRdp --screenshot <file>.png <mode>` (see [Screens](#screens)). No display required.
 
 ## Status
 
@@ -25,21 +29,94 @@ text over the `cliprdr` channel. Verified against **FreeRDP** and against **msts
 the ActiveX control that is `mstsc.exe`'s own engine — so the mock is mstsc-grade. See
 `tools/RdpAxClient/` for the mstscax-based test client.
 
-The mock also speaks the **dynamic virtual channel** layer (`drdynvc`): it advertises
-capabilities, opens one or more named DVCs (server-initiated create), and **echoes** any
-data sent back on the same channel. This makes it a target for tooling that rides DVCs —
-e.g. [RDPeek](https://github.com/guscatalano/RDPeek), whose plugin/agent open
-`dvc::diag::inspector`. Choose the channels with `--dvc` (default `ECHO`).
-
 Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred.
+
+## How it fits together
+
+A real RDP client speaks TPKT → X.224 → TLS → MCS → capability exchange to the mock's
+per-connection **state machine**, which then renders a software desktop and carries the
+static + dynamic virtual channels. Tooling that rides a **dynamic virtual channel** — most
+notably [RDPeek](https://github.com/guscatalano/RDPeek), whose plugin/agent open
+`dvc::diag::inspector` — plugs straight in.
+
+```mermaid
+flowchart LR
+    subgraph client["RDP client&nbsp;&nbsp;(mstsc · mstscax · FreeRDP)"]
+        app["your DVC plugin<br/>(e.g. RDPeek)"]
+    end
+    subgraph mock["mock-rdp server"]
+        direction TB
+        sm["connection state machine<br/><i>TPKT · X.224 · TLS · MCS · caps</i>"]
+        desk["fake desktop<br/><i>software-rendered</i>"]
+        svc["static VCs<br/><i>rdpdr · cliprdr</i>"]
+        dvc["drdynvc<br/><i>dynamic virtual channels</i>"]
+        sm --> desk
+        sm --> svc
+        sm --> dvc
+    end
+    client -- "TCP / TLS&nbsp;:3389" --> sm
+    desk -- "bitmap updates" --> client
+    client -- "keyboard · mouse" --> desk
+    app <-->|"dvc::diag::inspector · echo / reply / faults"| dvc
+```
+
+The connection sequence the state machine drives, milestone by milestone:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as RDP client
+    participant M as mock-rdp
+    C->>M: X.224 Connection Request (negotiate SSL)
+    M-->>C: Connection Confirm — PROTOCOL_SSL
+    C->>M: TLS handshake
+    M-->>C: TLS established
+    C->>M: MCS Connect-Initial (+ virtual channels)
+    M-->>C: MCS Connect-Response
+    Note over C,M: channel joins · Client Info
+    M-->>C: Licensing — no license required
+    M-->>C: Demand Active (server capabilities)
+    C->>M: Confirm Active + finalization
+    Note over C,M: session ACTIVE
+    M-->>C: bitmap updates → desktop
+    C->>M: keyboard / mouse input
+    C->>M: drdynvc caps → open DVC
+    M-->>C: DVC data (echo / diag responder)
+```
+
+## Screens
+
+The interactive fake desktop (`--desktop`) is a tiny software-rendered window manager:
+draggable windows with z-order, a Start menu, File Explorer over an in-memory filesystem,
+Notepad, a Run dialog, a live **Channel Monitor**, and Default/Secure/Logon desktops.
+
+| | |
+|:---:|:---:|
+| ![Logon screen](docs/img/logon.png) | ![File Explorer and Notepad](docs/img/explorer-notepad.png) |
+| **Logon** (`--logon`) — any credentials accepted (no NLA) | **Explorer → Notepad** (`--demo`) — draggable windows |
+| ![Channel Monitor](docs/img/channel-monitor.png) | ![Connection Info](docs/img/connection-info.png) |
+| **Channel Monitor** (`--dvcmon`) — live per-channel traffic across input, graphics, SVCs and DVCs | **Connection Info** (`--stats`) — the live session at a glance |
+| ![Run dialog](docs/img/run-fallback.png) | ![Secure desktop](docs/img/secure.png) |
+| **Run** (`--demo-run`) — `Win+R` opens it; Enter launches an app | **Secure desktop** (`--secure`) — `Ctrl+Alt+End`, `Esc` returns |
+
+Regenerate any of these headlessly — no display, no server:
+
+```pwsh
+MockRdp --screenshot desktop.png --start-menu     # or: --logon --secure --stats --display
+MockRdp --screenshot monitor.png --dvcmon         # add --filter-app to filter one channel
+MockRdp --screenshot run.png     --demo-run       # Run dialog with a command typed
+MockRdp --screenshot files.png   --demo           # Explorer browsing into a Notepad open
+```
 
 ## Layout
 
 - `src/MockRdp/` — the server. `Framing/` (TPKT), `X224/` (COTP + negotiation, class `Cotp`),
-  `Transport/` (self-signed cert), `Server/` (listener + per-connection state machine), `Util/`.
+  `Transport/` (self-signed cert), `Server/` (listener + per-connection state machine),
+  `Desktop/` (fake desktop + renderer), `Rdp/` (input, graphics, DVC), `Util/`.
 - `tests/MockRdp.Tests/` — xUnit. `Harness/RdpTestClient.cs` is the growing in-process
   conformance client; `Harness/MockServerFixture.cs` spins up a loopback server per test.
 - `scripts/` — real-client checkpoint automation (see below).
+- `docs/img/` — the screenshots above (produced by `--screenshot`).
 
 ## Quick demo
 
@@ -57,7 +134,8 @@ persisted (no cert-store or registry changes).
 ```pwsh
 dotnet test                                   # unit + in-process end-to-end (Tier 1)
 dotnet run --project src/MockRdp -- --port 3389 --log-level trace
-dotnet run --project src/MockRdp -- --dvc "dvc::diag::inspector"   # open a specific DVC
+dotnet run --project src/MockRdp -- --desktop                     # interactive fake desktop
+dotnet run --project src/MockRdp -- --dvc "dvc::diag::inspector"  # open a specific DVC
 ```
 
 Server flags: `--port <n>` (default 3389), `--bind <ip>`, `--log-level trace|debug|info|warn|error`.
@@ -75,18 +153,18 @@ Drive redirection (`rdpdr` / `\\tsclient`), each takes client paths:
 - `--rdpdr-list <dir[,...]>` — enumerate a redirected directory.
 - `--rdpdr-write <path[,...]>` — write a small marker file to the client.
 
-Fake desktop (experimental — a software-rendered, interactive Windows-like session):
-- `--desktop` — render a fake desktop instead of the colour test pattern, with a tiny window
-  manager: the **Start** menu launches cascading windows, windows are **draggable** by their
-  title bar (with z-order) and closable via **×**, only changed tiles are resent (dirty-rect),
-  and the taskbar clock ticks. **File Explorer** browses an in-memory filesystem (`C:\Windows`,
-  `C:\Users`, …) — click folders to navigate, `..` to go up, a file to open it in **Notepad**.
-  **Keyboard** input works (scancode→char, US layout): type into Notepad, or into the **Run**
-  dialog (Start → Run…) and press Enter to launch `explorer` / `notepad` / `cmd`. Press
-  **Ctrl+Alt+End** (the remote secure-attention sequence) to switch to the **secure /
-  Winlogon desktop**; **Esc** returns. Mirrors Windows' Default vs. Secure desktops.
-- `--screenshot <path.png> [--secure] [--start-menu] [--demo]` — render one frame of a chosen
-  state to a PNG and exit (no server); `--demo` launches a couple of windows first.
+Fake desktop (`--desktop`) — a software-rendered, interactive Windows-like session with a
+tiny window manager. The **Start** menu launches cascading windows; windows are **draggable**
+by their title bar (with z-order) and closable via **×**; only changed tiles are resent
+(dirty-rect); the taskbar clock ticks. **File Explorer** browses an in-memory filesystem
+(`C:\Windows`, `C:\Users`, …). **Keyboard** input works (scancode→char, US layout): type into
+Notepad, or into the **Run** dialog and press Enter to launch `explorer` / `notepad` / `cmd`;
+**Win+R** opens Run directly. **Ctrl+Alt+End** (the remote secure-attention sequence) switches
+to the **secure / Winlogon desktop**; **Esc** returns. Mirrors Windows' Default vs. Secure desktops.
+
+- `--screenshot <path.png>` — render one frame and exit (no server). Modifiers:
+  `--logon`, `--secure`, `--start-menu`, `--stats`, `--display`, `--tsclient`, `--dvcmon`
+  (`--filter-app`), `--dvcapp`, `--demo`, `--demo-run`, `--scroll` (`--top`).
 
 ## CI & prebuilt binary
 
