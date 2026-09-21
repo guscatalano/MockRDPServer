@@ -37,7 +37,6 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private ushort _userChannelId;
     private uint _displayControlId;                 // DVC id of Microsoft::Windows::RDS::DisplayControl (0 = not open)
     private (int W, int H)? _pendingResize;         // set by a MONITOR_LAYOUT PDU; applied by the serve loop
-    private bool _shutdownRequested;                // client asked to disconnect (Shutdown Request PDU)
     private ushort _cliprdrChannelId;
     private bool _offeredServerClipboard;
 
@@ -454,15 +453,6 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             else
                 await HandleSlowPathAsync(frame.Value.Payload, ct);
 
-            // The client asked to disconnect (Shutdown Request) — acknowledge with an MCS
-            // Disconnect Provider Ultimatum and end the session so it closes in one step.
-            if (_shutdownRequested)
-            {
-                await WriteAsync(McsPdu.BuildDisconnectProviderUltimatum(), ct);
-                log.LogInformation("Sent Disconnect Provider Ultimatum; session ended.");
-                return;
-            }
-
             // A Display Control MONITOR_LAYOUT PDU asked for a new resolution — apply it now
             // (no pending read is in flight here, so the reactivation can read its own frames).
             if (_pendingResize is { } rs)
@@ -547,10 +537,11 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 }
                 else if (type2 == Finalization.Pdu2ShutdownRequest)
                 {
-                    // The client (e.g. closing mstsc) asked to disconnect. Tear the connection
-                    // down ourselves so the client closes in one step instead of timing out.
-                    log.LogInformation("Client sent Shutdown Request — disconnecting.");
-                    _shutdownRequested = true;
+                    // The client (e.g. closing mstsc) asked to log off. Deny it, as a real host with
+                    // no clean logoff does — mstsc then shows its "disconnect?" confirmation dialog.
+                    log.LogInformation("Client sent Shutdown Request — denied (client will confirm).");
+                    await WriteAsync(McsPdu.BuildSendDataIndication(
+                        Gcc.IoChannelId, Finalization.BuildDataPdu(Finalization.Pdu2ShutdownDenied, default)), ct);
                 }
                 else
                 {

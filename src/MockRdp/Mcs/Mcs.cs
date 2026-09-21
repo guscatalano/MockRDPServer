@@ -137,12 +137,6 @@ public static class McsPdu
         return Cotp.BuildDataTpdu(w.AsSpan());
     }
 
-    /// <summary>MCS Disconnect Provider Ultimatum (T.125): the server-initiated tear-down sent when
-    /// the client asks to disconnect (e.g. a Shutdown Request), so the client closes in one step.
-    /// Choice 8 (disconnectProviderUltimatum) with reason rn-user-requested.</summary>
-    public static byte[] BuildDisconnectProviderUltimatum() =>
-        Cotp.BuildDataTpdu([0x21, 0x80]);
-
     /// <summary>Channel Join Confirm granting the requested channel.</summary>
     public static byte[] BuildChannelJoinConfirm(ushort initiator, ushort channelId)
     {
