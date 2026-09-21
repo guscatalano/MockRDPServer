@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/MockRdp/MockRdp.csproj" />
+    <Project Path="src/MockRdp.Tray/MockRdp.Tray.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/MockRdp.Tests/MockRdp.Tests.csproj" />
