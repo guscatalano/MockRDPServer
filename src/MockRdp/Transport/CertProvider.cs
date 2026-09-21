@@ -10,7 +10,26 @@ namespace MockRdp.Transport;
 /// </summary>
 public static class CertProvider
 {
-    public static X509Certificate2 CreateSelfSigned(string commonName = "mock-rdp")
+    /// <summary>Loads a persisted dev cert from <paramref name="pfxPath"/>, creating and saving one
+    /// on first use. Stable across launches (same thumbprint), so a client can pin/trust it once.</summary>
+    public static X509Certificate2 GetOrCreatePersistent(string pfxPath, string commonName = "mock-rdp")
+    {
+        if (File.Exists(pfxPath))
+        {
+            try { return X509CertificateLoader.LoadPkcs12(File.ReadAllBytes(pfxPath), null); }
+            catch { /* unreadable/corrupt — regenerate below */ }
+        }
+        var pfx = CreateSelfSignedPfx(commonName);
+        Directory.CreateDirectory(Path.GetDirectoryName(pfxPath)!);
+        File.WriteAllBytes(pfxPath, pfx);
+        return X509CertificateLoader.LoadPkcs12(pfx, null);
+    }
+
+    public static X509Certificate2 CreateSelfSigned(string commonName = "mock-rdp") =>
+        // Round-trip through PKCS#12 so the private key is usable by SslStream on Windows.
+        X509CertificateLoader.LoadPkcs12(CreateSelfSignedPfx(commonName), null);
+
+    private static byte[] CreateSelfSignedPfx(string commonName)
     {
         using var rsa = RSA.Create(2048);
         var req = new CertificateRequest(
@@ -30,8 +49,6 @@ public static class CertProvider
 
         using var cert = req.CreateSelfSigned(
             DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(5));
-
-        // Round-trip through PKCS#12 so the private key is usable by SslStream on Windows.
-        return X509CertificateLoader.LoadPkcs12(cert.Export(X509ContentType.Pfx), null);
+        return cert.Export(X509ContentType.Pfx);   // key is exportable here (before the round-trip)
     }
 }

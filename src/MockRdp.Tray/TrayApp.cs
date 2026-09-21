@@ -4,6 +4,7 @@ using System.Net;
 using System.Text;
 using System.Windows.Forms;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Win32;
 using MockRdp.Server;
 using MockRdp.Transport;
 
@@ -45,6 +46,9 @@ internal sealed class TrayApp : IDisposable
 
     private readonly Redir _redir = new();
     private bool _bootToDesktop;   // skip the fake logon screen and boot straight to the desktop
+
+    private static string CertPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MockRdp", "dev-cert.pfx");
 
     public TrayApp()
     {
@@ -93,6 +97,7 @@ internal sealed class TrayApp : IDisposable
         _menu.Items.Add(boot);
 
         _menu.Items.Add(new ToolStripMenuItem("Save .rdp to Desktop", null, (_, _) => SaveRdpToDesktop()));
+        _menu.Items.Add(new ToolStripMenuItem("Trust server certificate (one-time)", null, (_, _) => TrustCert()));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => Exit()));
     }
@@ -102,7 +107,10 @@ internal sealed class TrayApp : IDisposable
     private void StartServer()
     {
         if (Running) return;
-        var cert = CertProvider.CreateSelfSigned();
+        // A stable dev cert (persisted) so its thumbprint doesn't change each launch — then pin it
+        // per-server in the registry so headless clients (mstscax) connect without a cert prompt.
+        var cert = CertProvider.GetOrCreatePersistent(CertPath);
+        PinServerCert(cert.GetCertHash());
         _cts = new CancellationTokenSource();
         _listener = new RdpListener(IPAddress.Loopback, Port, cert, NullLoggerFactory.Instance,
             dvcChannels: null, rdpdrReads: null, dvcBehaviors: null,
@@ -110,6 +118,22 @@ internal sealed class TrayApp : IDisposable
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
         UpdateStatus();
+    }
+
+    /// <summary>Pins the server cert's SHA-1 hash per-server in the RDP client registry, so mstsc/
+    /// mstscax accept it for 127.0.0.1/localhost without prompting (no global Root-store trust).</summary>
+    private static void PinServerCert(byte[] certHash)
+    {
+        foreach (var server in new[] { "127.0.0.1", "localhost", $"127.0.0.1:{Port}", $"localhost:{Port}" })
+        {
+            try
+            {
+                using var k = Registry.CurrentUser.CreateSubKey(
+                    $@"Software\Microsoft\Terminal Server Client\Servers\{server}");
+                k?.SetValue("CertHash", certHash, RegistryValueKind.Binary);
+            }
+            catch { /* best-effort */ }
+        }
     }
 
     private void RestartServer()
@@ -186,6 +210,29 @@ internal sealed class TrayApp : IDisposable
         var path = Path.Combine(Path.GetTempPath(), "mock-rdp-tray.rdp");
         File.WriteAllText(path, Rdp(p), Encoding.ASCII);   // mstsc wants ASCII
         return path;
+    }
+
+    /// <summary>Installs the (stable) server cert into the user's Trusted Root store so headless
+    /// clients — the hosted mstscax control — connect without a cert warning. One-time: the cert is
+    /// persistent, so its thumbprint doesn't change across launches. Windows shows one confirm prompt.</summary>
+    private void TrustCert()
+    {
+        try
+        {
+            using var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(CertPath);
+            using var store = new System.Security.Cryptography.X509Certificates.X509Store(
+                System.Security.Cryptography.X509Certificates.StoreName.Root,
+                System.Security.Cryptography.X509Certificates.StoreLocation.CurrentUser);
+            store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadWrite);
+            store.Add(cert);
+            store.Close();
+            Balloon("Server certificate trusted. Headless clients (the Bootstrap) now connect without a prompt.");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Couldn't trust the certificate:\n" + ex.Message, "Mock RDP",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
     }
 
     private void SaveRdpToDesktop()
