@@ -84,6 +84,13 @@ public sealed class FakeDesktop : IDisposable
     private string _logonPassword = "";
     private bool _logonFocusUser;   // false = password field focused
 
+    /// <summary>The user name entered at the logon screen (used for the Save Session Info PDU).</summary>
+    public string LogonUser => _logonUser;
+
+    /// <summary>Set true for one poll when the user just signed in, so the host can send the
+    /// Server Save Session Info ("logon") PDU. The host reads and clears it.</summary>
+    public bool JustSignedIn { get; set; }
+
     public FakeDesktop(int width, int height, bool logon = false)
     {
         Width = width;
@@ -561,7 +568,11 @@ public sealed class FakeDesktop : IDisposable
         return [dx + dw - 110, dy + dh - 44, 90, 30];
     }
 
-    private bool SignIn() => Switch(DesktopKind.Default); // any credentials accepted
+    private bool SignIn()   // any credentials accepted
+    {
+        JustSignedIn = true;                  // host will emit the Save Session Info PDU
+        return Switch(DesktopKind.Default) || true;   // always redraw (logon -> desktop)
+    }
 
     private static (int X, int Y, int W, int H) LogonBox(int width, int height)
     {

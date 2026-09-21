@@ -821,6 +821,16 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // An Explorer \\tsclient click may have queued an on-demand rdpdr op — start it.
         if (_rdpdrKick) { _rdpdrKick = false; if (_rdpdrPhase == RdpdrPhase.Idle) await StartNextRdpdrOpAsync(ct); }
 
+        // The user just signed in at the logon screen — send the Server Save Session Info
+        // ("logon") PDU (MS-RDPBCGR 2.2.10.1) before painting the desktop, as a real host would.
+        if (_desktop.JustSignedIn)
+        {
+            _desktop.JustSignedIn = false;
+            await WriteAsync(McsPdu.BuildSendDataIndication(
+                Gcc.IoChannelId, Finalization.BuildSaveSessionInfo("MOCK", _desktop.LogonUser, 1)), ct);
+            log.LogInformation("Sent Save Session Info (logon) PDU for user '{User}'.", _desktop.LogonUser);
+        }
+
         if (!changed) return;
         if (_desktop.IsDragging && _desktopClock.ElapsedMilliseconds < 33) return; // coalesce drag frames
         _desktopClock.Restart();

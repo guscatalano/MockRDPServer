@@ -17,6 +17,9 @@ public static class Finalization
     public const byte Pdu2Synchronize = 31;
     public const byte Pdu2FontList = 39;
     public const byte Pdu2FontMap = 40;
+    public const byte Pdu2SaveSessionInfo = 38;
+
+    private const uint InfoTypeLogon = 0x00000000;   // INFOTYPE_LOGON -> TS_LOGON_INFO
 
     private const ushort CtrlActionCooperate = 0x0004;
     private const ushort CtrlActionGrantedControl = 0x0002;
@@ -59,6 +62,38 @@ public static class Finalization
         d.WriteUInt16LE(0x0003);   // mapFlags = FONTLIST_FIRST | FONTLIST_LAST
         d.WriteUInt16LE(4);        // entrySize
         return BuildDataPdu(Pdu2FontMap, d.AsSpan());
+    }
+
+    /// <summary>
+    /// Server Save Session Info PDU (MS-RDPBCGR 2.2.10.1): the "logon PDU" the server sends
+    /// once the user has logged on, notifying the client of the domain/user/session. We emit the
+    /// simplest fixed-size variant — INFOTYPE_LOGON + TS_LOGON_INFO (2.2.10.1.1.1, 576 bytes).
+    /// </summary>
+    public static byte[] BuildSaveSessionInfo(string domain, string userName, uint sessionId)
+    {
+        // Fixed-length, NUL-terminated UTF-16LE, zero-padded field. Returns cb (bytes, excluding NUL).
+        static byte[] FixedUnicode(string s, int fixedBytes, out uint cb)
+        {
+            var buf = new byte[fixedBytes];
+            int max = (fixedBytes / 2) - 1;                     // leave room for the NUL terminator
+            var bytes = System.Text.Encoding.Unicode.GetBytes(s.Length > max ? s[..max] : s);
+            Array.Copy(bytes, buf, bytes.Length);
+            cb = (uint)bytes.Length;
+            return buf;
+        }
+
+        var domainBuf = FixedUnicode(domain, 52, out uint cbDomain);
+        var userBuf = FixedUnicode(userName, 512, out uint cbUser);
+
+        var d = new ByteWriter();
+        d.WriteUInt32LE(InfoTypeLogon);   // infoType
+        // TS_LOGON_INFO (2.2.10.1.1.1)
+        d.WriteUInt32LE(cbDomain);
+        d.WriteBytes(domainBuf);          // Domain[52]
+        d.WriteUInt32LE(cbUser);
+        d.WriteBytes(userBuf);            // UserName[512]
+        d.WriteUInt32LE(sessionId);
+        return BuildDataPdu(Pdu2SaveSessionInfo, d.AsSpan());
     }
 
     /// <summary>Reads the PDUTYPE2 sub-type from a client Data PDU (share control payload), or -1.</summary>
