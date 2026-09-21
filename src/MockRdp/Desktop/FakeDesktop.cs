@@ -117,13 +117,14 @@ public sealed class FakeDesktop : IDisposable
     // Clipboard file transfer: files the user copied (Ctrl+C) to offer to the client, and whether
     // a paste (Ctrl+V) was requested (pull a file from the client's clipboard). Drained by the
     // connection, which drives the MS-RDPECLIP exchange.
-    private readonly List<(string Name, byte[] Bytes)> _clipCopies = new();
+    private readonly List<(string Name, byte[]? Bytes, long Size)> _clipCopies = new();
     private bool _pasteRequested;
     private long _lastClickMs;
     private int _lastClickWinId = -1, _lastClickRow = -1;
 
-    /// <summary>A file the user copied on the desktop, to be offered to the client clipboard.</summary>
-    public (string Name, byte[] Bytes)? TakeClipboardCopy()
+    /// <summary>A file the user copied on the desktop, to be offered to the client clipboard.
+    /// <c>Bytes</c> is null for a large generated file (serve <c>Size</c> bytes on the fly).</summary>
+    public (string Name, byte[]? Bytes, long Size)? TakeClipboardCopy()
     {
         if (_clipCopies.Count == 0) return null;
         var c = _clipCopies[0];
@@ -346,8 +347,17 @@ public sealed class FakeDesktop : IDisposable
         {
             if (Focused is { Kind: WinKind.Explorer, ClientPath: null, Selected: { IsDir: false } sel })
             {
-                _clipCopies.Add((sel.Name, System.Text.Encoding.UTF8.GetBytes(sel.Text)));
-                Emit($"Copied '{sel.Name}' → client clipboard");
+                if (sel.GeneratedSize > 0)
+                {
+                    _clipCopies.Add((sel.Name, null, sel.GeneratedSize));
+                    Emit($"Copied '{sel.Name}' ({sel.GeneratedSize:N0} bytes) → client clipboard");
+                }
+                else
+                {
+                    var b = System.Text.Encoding.UTF8.GetBytes(sel.Text);
+                    _clipCopies.Add((sel.Name, b, b.Length));
+                    Emit($"Copied '{sel.Name}' → client clipboard");
+                }
                 return true;
             }
             return false;
@@ -516,7 +526,13 @@ public sealed class FakeDesktop : IDisposable
         bool dbl = w.Id == _lastClickWinId && row == _lastClickRow
                    && Environment.TickCount64 - _lastClickMs < 400;
         _lastClickWinId = w.Id; _lastClickRow = row; _lastClickMs = Environment.TickCount64;
-        if (dbl) { OpenNotepad(entry.Name, entry.Text); return true; }
+        if (dbl)
+        {
+            OpenNotepad(entry.Name, entry.GeneratedSize > 0
+                ? $"[{entry.GeneratedSize:N0}-byte generated file]\r\n\r\nSelect it and press Ctrl+C to copy it to your\r\nRDP client — a large transfer, so you'll see a progress bar."
+                : entry.Text);
+            return true;
+        }
         w.Selected = entry;
         return true;
     }

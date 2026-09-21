@@ -188,6 +188,12 @@ internal sealed class FileBrowserWindow : Form
             _preview.Text = $"{v.Path}   —   {dirs} folder(s), {files} file(s)\r\n\r\n"
                           + string.Join("\r\n", lines);
         }
+        else if (v.GeneratedSize > 0)
+        {
+            _preview.Text = $"[generated file — {v.GeneratedSize:N0} bytes]\r\n\r\n"
+                          + "Streamed on the fly (not stored). On the desktop, select it and press "
+                          + "Ctrl+C to copy it to the client and watch the transfer progress.";
+        }
         else
         {
             _preview.Text = v.Text;

@@ -7,6 +7,9 @@ public sealed class VfsNode
     public required string Name { get; init; }
     public bool IsDir { get; init; }
     public string Text { get; set; } = "";
+    /// <summary>&gt; 0 for a large "streamed" file whose bytes are generated on the fly (not stored),
+    /// so a multi-megabyte file costs no memory. <see cref="Text"/> is ignored for these.</summary>
+    public long GeneratedSize { get; init; }
     public VfsNode? Parent { get; private set; }
     public List<VfsNode> Children { get; } = new();
 
@@ -20,6 +23,14 @@ public sealed class VfsNode
     public VfsNode AddFile(string name, string text)
     {
         var n = new VfsNode { Name = name, IsDir = false, Text = text, Parent = this };
+        Children.Add(n);
+        return n;
+    }
+
+    /// <summary>Adds a large file whose <paramref name="size"/> bytes are generated on demand.</summary>
+    public VfsNode AddLargeFile(string name, long size)
+    {
+        var n = new VfsNode { Name = name, IsDir = false, GeneratedSize = size, Parent = this };
         Children.Add(n);
         return n;
     }
@@ -76,7 +87,9 @@ public static class Vfs
         docs.AddFile("readme.txt",
             "Hello from the mock RDP desktop.\r\n\r\nThis file lives in an in-memory VFS and\r\nis served by the fake File Explorer.");
         docs.AddFile("notes.txt", "- wire up the desktop\r\n- add a filesystem\r\n- open files in Notepad\r\n- profit");
-        user.AddDir("Downloads");
+        var dl = user.AddDir("Downloads");
+        // A big generated file: select it and Ctrl+C to copy it to the client and watch the progress bar.
+        dl.AddLargeFile("large-sample.dat", 32L * 1024 * 1024);   // 32 MiB, streamed on the fly
         user.AddDir("Desktop");
 
         var pf = c.AddDir("Program Files");
@@ -84,6 +97,17 @@ public static class Vfs
 
         c.AddFile("autoexec.bat", "@echo off\r\necho fake machine\r\n");
         return c;
+    }
+
+    /// <summary>Fills <paramref name="buf"/> with the deterministic content of a generated file at
+    /// byte <paramref name="position"/> — a repeating printable line, so any range is reproducible
+    /// without storing the file.</summary>
+    public static void FillGenerated(Span<byte> buf, long position)
+    {
+        var line = System.Text.Encoding.ASCII.GetBytes(
+            "mock-rdp large sample file — this content is generated on the fly to demo transfer progress.\r\n");
+        for (int i = 0; i < buf.Length; i++)
+            buf[i] = line[(int)((position + i) % line.Length)];
     }
 
     /// <summary>The default starting folder for File Explorer (the user's home).</summary>

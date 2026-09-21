@@ -22,6 +22,26 @@ public static class VirtualChannel
         return w.ToArray();
     }
 
+    /// <summary>Splits a payload larger than the negotiated VC chunk size into multiple Channel PDUs
+    /// (FIRST … LAST), each carrying the total length — required for large clipboard file transfers.
+    /// Small payloads yield a single FIRST|LAST chunk.</summary>
+    public static IEnumerable<byte[]> WrapChunked(byte[] data, int chunkSize = 1590)
+    {
+        if (data.Length <= chunkSize) { yield return Wrap(data); yield break; }
+        for (int off = 0; off < data.Length; off += chunkSize)
+        {
+            int len = Math.Min(chunkSize, data.Length - off);
+            uint flags = 0;
+            if (off == 0) flags |= ChannelFlagFirst;
+            if (off + len >= data.Length) flags |= ChannelFlagLast;
+            var w = new ByteWriter();
+            w.WriteUInt32LE((uint)data.Length);   // total (uncompressed) length, in every chunk header
+            w.WriteUInt32LE(flags);
+            w.WriteBytes(data.AsSpan(off, len));
+            yield return w.ToArray();
+        }
+    }
+
     /// <summary>Strips the 8-byte Channel PDU Header, returning the channel payload.</summary>
     public static ReadOnlySpan<byte> Unwrap(ReadOnlySpan<byte> channelPdu) =>
         channelPdu.Length >= 8 ? channelPdu[8..] : default;
