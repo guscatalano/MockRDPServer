@@ -381,6 +381,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             ConnectionStats = BuildConnectionStats,
             DvcTraffic = () => _dvcLog.ToArray(),
             DvcChannels = BuildChannels,
+            ClipboardAvailable = () => _cliprdrChannelId != 0,
         };
         log.LogInformation("Fake desktop booting to {Boot} (NLA requested: {Nla}).",
             showLogon ? "logon screen" : "desktop", _nlaRequested);
@@ -1213,11 +1214,19 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         foreach (var note in _desktop.TakeEvents())
             log.LogInformation("Desktop: {Note}", note);
 
-        // Clipboard file transfer driven from the desktop.
-        if (_cliprdrChannelId != 0)
+        // Clipboard file transfer driven from the desktop. Drain the intents even when clipboard
+        // redirection is off, so we can explain the no-op instead of silently swallowing it.
+        bool clipboardOn = _cliprdrChannelId != 0;
+
+        // Mock → client: the user copied a file; (re)offer it on the mock's clipboard.
+        if (_desktop.TakeClipboardCopy() is { } copied)
         {
-            // Mock → client: the user copied a file; (re)offer it on the mock's clipboard.
-            if (_desktop.TakeClipboardCopy() is { } copied)
+            if (!clipboardOn)
+            {
+                log.LogInformation("Clipboard: copy of '{File}' ignored — the client isn't redirecting its " +
+                    "clipboard (enable Clipboard redirection and reconnect).", copied.Name);
+            }
+            else
             {
                 _offeredFileName = copied.Name;
                 _offeredFileBytes = copied.Bytes;   // null ⇒ generated on the fly
@@ -1227,20 +1236,22 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 log.LogInformation("Clipboard: offered copied file '{File}' ({Size} bytes) to the client.",
                     copied.Name, copied.Size);
             }
+        }
 
-            // Client → mock: the user pressed Ctrl+V; pull the client's file if it offered one.
-            if (_desktop.TakeClipboardPasteRequest())
+        // Client → mock: the user pressed Ctrl+V; pull the client's file if it offered one.
+        if (_desktop.TakeClipboardPasteRequest())
+        {
+            if (!clipboardOn)
+                log.LogInformation("Clipboard: paste ignored — the client isn't redirecting its clipboard.");
+            else if (_clientFileFormatId != 0)
             {
-                if (_clientFileFormatId != 0)
-                {
-                    _pasteState = PasteState.WaitingDescriptor;
-                    await SendClipboardAsync(Clipboard.FormatDataRequest(_clientFileFormatId), ct);
-                    log.LogInformation("Clipboard: paste requested — asking the client for its file descriptor.");
-                }
-                else
-                {
-                    log.LogInformation("Clipboard: paste requested, but the client has no file on its clipboard.");
-                }
+                _pasteState = PasteState.WaitingDescriptor;
+                await SendClipboardAsync(Clipboard.FormatDataRequest(_clientFileFormatId), ct);
+                log.LogInformation("Clipboard: paste requested — asking the client for its file descriptor.");
+            }
+            else
+            {
+                log.LogInformation("Clipboard: paste requested, but the client has no file on its clipboard.");
             }
         }
 

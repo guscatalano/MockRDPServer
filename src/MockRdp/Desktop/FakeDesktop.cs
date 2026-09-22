@@ -70,6 +70,10 @@ public sealed class FakeDesktop : IDisposable
     public Func<IReadOnlyList<DvcEvent>>? DvcTraffic;
     public Func<IReadOnlyList<string>>? DvcChannels;
 
+    /// <summary>Whether the client redirected its clipboard (the cliprdr channel is open). Used to
+    /// warn in-session when the user tries to copy/paste a file but redirection is off.</summary>
+    public Func<bool>? ClipboardAvailable;
+
     /// <summary>True while a live window (Connection Info / DVC Monitor) is open, so the host ticks
     /// faster and keeps its contents fresh.</summary>
     public bool WantsLiveTick => _windows.Any(w => w.Kind is WinKind.Stats or WinKind.DvcMon);
@@ -138,6 +142,25 @@ public sealed class FakeDesktop : IDisposable
         if (!_pasteRequested) return false;
         _pasteRequested = false;
         return true;
+    }
+
+    private bool ClipboardOff() => ClipboardAvailable is not null && !ClipboardAvailable();
+
+    private void WarnClipboard(string action)
+    {
+        StartMenuOpen = false;
+        Open(new Win
+        {
+            Kind = WinKind.Generic,
+            Title = "Clipboard redirection is off",
+            Body = $"Can't {action} files: your RDP client isn't redirecting its clipboard.\r\n\r\n"
+                 + "Turn on Clipboard redirection in the client and reconnect\r\n"
+                 + "(mstsc: Local Resources > Clipboard; or the tray's Redirections menu),\r\n"
+                 + "then try again.",
+            W = 470,
+            H = 190,
+        });
+        Emit($"Clipboard {action} blocked — client clipboard redirection is off");
     }
 
     /// <summary>Called when a client file arrives (paste): drop it on the Desktop and open it.</summary>
@@ -347,6 +370,7 @@ public sealed class FakeDesktop : IDisposable
         {
             if (Focused is { Kind: WinKind.Explorer, ClientPath: null, Selected: { IsDir: false } sel })
             {
+                if (ClipboardOff()) { WarnClipboard("copy"); return true; }
                 if (sel.GeneratedSize > 0)
                 {
                     _clipCopies.Add((sel.Name, null, sel.GeneratedSize));
@@ -366,6 +390,7 @@ public sealed class FakeDesktop : IDisposable
         // Ctrl+V — paste a file from the client's clipboard onto the desktop.
         if (_ctrl && scancode == 0x2F)   // 'V'
         {
+            if (ClipboardOff()) { WarnClipboard("paste"); return true; }
             _pasteRequested = true;
             Emit("Ctrl+V → requesting a file from the client clipboard");
             return true;
