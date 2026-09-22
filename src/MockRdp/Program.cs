@@ -18,6 +18,7 @@ string[]? rdpdrWrites = null;
 string? logFile = null;
 var dvcReplies = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
 var dvcFaults = new Dictionary<string, Dvc.Fault>(StringComparer.OrdinalIgnoreCase);
+var dvcBridges = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 bool desktop = args.Contains("--desktop");
 bool logon = args.Contains("--logon");
 
@@ -141,6 +142,7 @@ for (int i = 0; i < args.Length - 1; i++)
         case "--rdpdr-write": rdpdrWrites = args[++i].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries); break;
         case "--dvc-reply":  { var (ch, v) = SplitEq(args[++i]); dvcReplies[ch] = File.ReadAllBytes(v); break; }
         case "--dvc-fault":  { var (ch, v) = SplitEq(args[++i]); dvcFaults[ch] = Enum.Parse<Dvc.Fault>(v, ignoreCase: true); break; }
+        case "--dvc-bridge": { var (ch, v) = SplitEq(args[++i]); dvcBridges[ch] = v; break; }
         case "--log-level":
             logLevel = args[++i].ToLowerInvariant() switch
             {
@@ -186,7 +188,8 @@ if (dvcReplies.Count > 0 || dvcFaults.Count > 0)
 }
 
 using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
-    rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"));
+    rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"),
+    dvcBridges: dvcBridges.Count > 0 ? dvcBridges : null);
 listener.Start();
 
 using var cts = new CancellationTokenSource();

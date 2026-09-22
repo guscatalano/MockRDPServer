@@ -21,9 +21,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     string[]? dvcChannels = null, string[]? rdpdrReads = null,
     Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
     string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false,
-    bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null)
+    bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null,
+    Dictionary<string, string>? dvcBridges = null)
 {
     private bool _nlaRequested;
+    // DVC bridge: channel name -> "host:port" of a real agent (rdpeek-agent serve-tcp). When set, the
+    // mock relays the channel's bytes to/from that endpoint instead of answering itself.
+    private readonly Dictionary<string, string> _bridges = dvcBridges ?? new();
+    private readonly Dictionary<uint, System.Net.Sockets.NetworkStream> _bridgeStreams = new();
     private Stream _stream = tcp.GetStream();
 
     // Snapshot state surfaced by the desktop's "Connection Info" window.
@@ -912,6 +917,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
         var name = _dvcOpen[msg.ChannelId];
 
+        // DVC bridge: relay this channel's bytes to/from a real agent over TCP (no local answering).
+        if (_bridges.ContainsKey(name))
+        {
+            await BridgeToAgentAsync(msg.ChannelId, name, complete, ct);
+            return;
+        }
+
         // RDPeek diagnostics channels: be a real protocol peer (Hello→Capabilities, Ping→Ping)
         // instead of echoing, so the plugin's handshake actually completes.
         if (name.StartsWith("dvc::diag::", StringComparison.Ordinal))
@@ -967,6 +979,50 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
     private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>
         WriteAsync(McsPdu.BuildSendDataIndication(_drdynvcChannelId, VirtualChannel.Wrap(dvcPdu)), ct);
+
+    /// <summary>Relay one channel message to the bridged agent (client → agent), connecting on first
+    /// use and starting the reverse pump (agent → client). The mock stays a dumb byte relay — the real
+    /// agent does the protocol.</summary>
+    private async Task BridgeToAgentAsync(uint channelId, string name, byte[] complete, CancellationToken ct)
+    {
+        if (!_bridgeStreams.TryGetValue(channelId, out var stream))
+        {
+            var (host, port) = SplitHostPort(_bridges[name]);
+            var client = new System.Net.Sockets.TcpClient();
+            await client.ConnectAsync(host, port, ct);
+            stream = client.GetStream();
+            _bridgeStreams[channelId] = stream;
+            _ = PumpAgentToChannelAsync(channelId, name, stream, ct);
+            log.LogInformation("DVC bridge: '{Name}' (id {Id}) → {Endpoint}", name, channelId, _bridges[name]);
+        }
+
+        LogChannel(name, true, complete.Length, "bridged → agent");
+        await stream.WriteAsync(complete, ct);
+    }
+
+    /// <summary>Reverse pump: read the agent's frames off the TCP socket and write them back on the DVC.</summary>
+    private async Task PumpAgentToChannelAsync(uint channelId, string name, System.Net.Sockets.NetworkStream stream, CancellationToken ct)
+    {
+        var buf = new byte[64 * 1024];
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                int n = await stream.ReadAsync(buf, ct);
+                if (n <= 0) break;
+                var slice = buf.AsSpan(0, n).ToArray();
+                foreach (var p in Dvc.BuildData(channelId, slice)) await SendDvcAsync(p, ct);
+                LogChannel(name, false, n, "bridged ← agent");
+            }
+        }
+        catch (Exception ex) { log.LogInformation("DVC bridge '{Name}' pump ended: {Msg}", name, ex.Message); }
+    }
+
+    private static (string host, int port) SplitHostPort(string endpoint)
+    {
+        int i = endpoint.LastIndexOf(':');
+        return i < 0 ? (endpoint, 9999) : (endpoint[..i], int.TryParse(endpoint[(i + 1)..], out var p) ? p : 9999);
+    }
 
 
     // ── Drive redirection (MS-RDPEFS / rdpdr) ───────────────────────────────
@@ -1348,10 +1404,17 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         return payload;
     }
 
+    private readonly SemaphoreSlim _writeGate = new(1, 1);   // serialise writes (DVC bridge writes off-thread)
+
     private async Task WriteAsync(byte[] packet, CancellationToken ct)
     {
         log.LogTrace("Sending ({Len} bytes):\n{Hex}", packet.Length, HexDump.Format(packet));
-        await _stream.WriteAsync(packet, ct);
-        await _stream.FlushAsync(ct);
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            await _stream.WriteAsync(packet, ct);
+            await _stream.FlushAsync(ct);
+        }
+        finally { _writeGate.Release(); }
     }
 }
