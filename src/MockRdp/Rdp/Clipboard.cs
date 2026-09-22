@@ -35,6 +35,7 @@ public static class Clipboard
     // FILEDESCRIPTORW.flags and .fileAttributes.
     private const uint FdAttributes = 0x00000004;
     private const uint FdFilesize = 0x00000040;
+    private const uint FdProgressUi = 0x00004000;   // show the copy-progress dialog on the client
     private const uint FileAttributeNormal = 0x00000080;
 
     /// <summary>The clipboard format id the mock assigns to the "FileGroupDescriptorW" format.</summary>
@@ -128,7 +129,7 @@ public static class Clipboard
         var d = new ByteWriter();
         d.WriteUInt32LE(1);                                   // cItems
         // FILEDESCRIPTORW (592 bytes)
-        d.WriteUInt32LE(FdAttributes | FdFilesize);          // flags
+        d.WriteUInt32LE(FdAttributes | FdFilesize | FdProgressUi); // flags (FD_PROGRESSUI → progress dialog)
         d.WriteBytes(new byte[32]);                          // reserved1
         d.WriteUInt32LE(FileAttributeNormal);                // fileAttributes
         d.WriteBytes(new byte[16]);                          // reserved2
