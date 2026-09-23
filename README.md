@@ -63,9 +63,14 @@ proprietary server certificate + Security Exchange + MAC; server→client in the
 otherwise it falls back to encryption **NONE**. Method is chosen from what the client
 offers, preferring **128-bit RC4** — verified end-to-end against real FreeRDP `/sec:rdp`
 (reaches an active, rendering session, MAC-verified). 40/56-bit RC4 connect and decrypt
-correctly but are not strictly MAC-verified; **FIPS/3DES** and NLA/CredSSP
-(`PROTOCOL_HYBRID`) are still deferred. `--enc <128|56|40|none>` forces the preferred
-method; `allowStandardRdpSecurity: false` on the listener enforces TLS only.
+correctly but are not strictly MAC-verified; **FIPS/3DES** is still deferred. `--enc
+<128|56|40|none>` forces the preferred method; `allowStandardRdpSecurity: false` on the
+listener enforces TLS only.
+
+**RDSTLS** (`PROTOCOL_RDSTLS`) is also supported: TLS plus the RDSTLS authentication PDU
+exchange (Capabilities → Authentication Request → Authentication Response, MS-RDPBCGR
+2.2.17) used for RD Gateway / redirection reconnects. The mock accepts any credentials.
+NLA/CredSSP (`PROTOCOL_HYBRID`) remains deferred.
 
 ## How it fits together
 

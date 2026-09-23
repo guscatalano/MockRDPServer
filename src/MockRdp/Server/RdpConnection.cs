@@ -220,7 +220,21 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // Security-layer selection. Prefer TLS whenever the client offers it. A client that does
         // not offer TLS (a policy-locked mstsc forced off SSL, or FreeRDP `/sec:rdp`) falls back to
         // Standard RDP Security when allowed; otherwise it is rejected (TLS-only posture).
+        bool offersRdstls = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.RdsTls) != 0;
         bool offersTls = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.Ssl) != 0;
+
+        // RDSTLS (MS-RDPBCGR 2.2.17): TLS transport plus an RDSTLS authentication PDU exchange — the
+        // security protocol used for RD Gateway / redirection reconnects. Selected when offered.
+        if (offersRdstls)
+        {
+            _selectedProtocol = RdpNegProtocol.RdsTls;
+            await WriteAsync(Cotp.BuildConnectionConfirm(RdpNegProtocol.RdsTls, negRspFlags: 0x01), ct);
+            log.LogInformation("Sent Connection Confirm selecting PROTOCOL_RDSTLS; starting TLS handshake.");
+            if (!await EstablishTlsAsync(ct)) return;
+            if (!await RunRdstlsAuthAsync(ct)) return;
+            await RunMcsAsync(ct);
+            return;
+        }
 
         if (!offersTls)
         {
@@ -251,6 +265,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         await WriteAsync(Cotp.BuildConnectionConfirm(RdpNegProtocol.Ssl, negRspFlags: 0x01), ct);
         log.LogInformation("Sent Connection Confirm selecting PROTOCOL_SSL; starting TLS handshake.");
 
+        if (!await EstablishTlsAsync(ct)) return;
+        await RunMcsAsync(ct);
+    }
+
+    /// <summary>Upgrades the transport to TLS as the server, using the self-signed cert. Shared by the
+    /// PROTOCOL_SSL and PROTOCOL_RDSTLS paths. Returns false (and logs) if the handshake fails.</summary>
+    private async Task<bool> EstablishTlsAsync(CancellationToken ct)
+    {
         var ssl = new SslStream(_stream, leaveInnerStreamOpen: false);
         try
         {
@@ -264,14 +286,41 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         catch (Exception ex)
         {
             log.LogError(ex, "TLS handshake failed.");
-            return;
+            return false;
         }
 
         _stream = ssl;
         State = ConnectionState.TlsUp;
         log.LogInformation("TLS established: {Protocol} / {Cipher}.", ssl.SslProtocol, ssl.NegotiatedCipherSuite);
+        return true;
+    }
 
-        await RunMcsAsync(ct);
+    /// <summary>Runs the RDSTLS authentication exchange over the established TLS channel (MS-RDPBCGR
+    /// 2.2.17): the server sends a Capabilities PDU, reads the client's Authentication Request (password
+    /// credentials or auto-reconnect cookie), and replies with an Authentication Response. The mock
+    /// accepts any credentials (it is a test host), so the result is always success. Returns false if
+    /// the exchange fails.</summary>
+    private async Task<bool> RunRdstlsAuthAsync(CancellationToken ct)
+    {
+        State = ConnectionState.Negotiating;
+        await WriteAsync(Rdstls.BuildCapabilities(), ct);
+        log.LogInformation("RDSTLS: sent Capabilities PDU.");
+
+        Rdstls.AuthRequest? req;
+        try { req = await Rdstls.ReadAuthRequestAsync(_stream, ct); }
+        catch (EndOfStreamException) { log.LogWarning("RDSTLS: closed before Authentication Request."); return false; }
+        catch (IOException) { log.LogWarning("RDSTLS: closed before Authentication Request."); return false; }
+
+        if (req is null) { log.LogWarning("RDSTLS: malformed or unsupported Authentication Request."); return false; }
+        _clientUser = req.UserName;
+        _clientDomain = req.Domain;
+        _nlaRequested = true;   // RDSTLS carries credentials, so the desktop boots straight in
+        log.LogInformation("RDSTLS: Authentication Request ({Kind}) user='{User}' domain='{Domain}'.",
+            req.Kind, req.UserName, req.Domain);
+
+        await WriteAsync(Rdstls.BuildAuthResponse(Rdstls.ResultSuccess), ct);
+        log.LogInformation("RDSTLS: sent Authentication Response (success).");
+        return true;
     }
 
     /// <summary>M2: MCS Connect-Initial/Response, then Erect Domain / Attach User / Channel Join.</summary>

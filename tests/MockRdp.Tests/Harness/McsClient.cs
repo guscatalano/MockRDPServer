@@ -267,6 +267,14 @@ public static class McsClient
         await client.ReadConnectionConfirmAsync(ct);
         if (useTls) await client.UpgradeToTlsAsync(ct: ct);
 
+        return await McsConnectAndJoinAsync(client, channels, ct);
+    }
+
+    /// <summary>The MCS portion after security negotiation: Connect-Initial, Erect Domain, Attach User,
+    /// and channel joins. Returns the user channel. Reused by the TLS, clear-text and RDSTLS paths.</summary>
+    public static async Task<ushort> McsConnectAndJoinAsync(
+        RdpTestClient client, string[] channels, CancellationToken ct)
+    {
         await client.WriteRawAsync(BuildConnectInitial(channels), ct);
         var (io, ids) = ParseConnectResponseNetwork(await client.ReadTpktPayloadAsync(ct));
 
