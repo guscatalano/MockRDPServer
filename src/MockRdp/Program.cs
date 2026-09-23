@@ -22,6 +22,20 @@ var dvcBridges = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase
 bool desktop = args.Contains("--desktop");
 bool logon = args.Contains("--logon");
 
+// No arguments = someone double-clicked the exe (test harnesses always pass --port/etc.). Hand off
+// to the system-tray app, which serves on launch and puts every feature in its right-click menu —
+// no cmdline, no cert prompt, no hand-written .rdp. Falls through to the console server if the tray
+// isn't deployed next to this exe.
+if (args.Length == 0)
+{
+    var trayExe = Path.Combine(AppContext.BaseDirectory, "MockRdpTray.exe");
+    if (File.Exists(trayExe))
+    {
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(trayExe) { UseShellExecute = true });
+        return;
+    }
+}
+
 // --screenshot <path>: render one desktop frame to PNG and exit (no server).
 int ssIdx = Array.IndexOf(args, "--screenshot");
 if (ssIdx >= 0 && ssIdx + 1 < args.Length)

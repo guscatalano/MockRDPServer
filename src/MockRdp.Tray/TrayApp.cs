@@ -10,12 +10,17 @@ using MockRdp.Transport;
 namespace MockRdp.Tray;
 
 /// <summary>
-/// A system-tray command &amp; control for the mock RDP server: hosts the server in-process and
-/// launches Remote Desktop against it with a chosen resolution and a set of redirections.
+/// A system-tray command &amp; control for the mock RDP server: hosts the server in-process, launches
+/// Remote Desktop against it, and exposes the common knobs (port, LAN bind, DVC channels, desktop,
+/// redirections, auto-connect, start-at-logon) as menu toggles. Settings persist in the registry so
+/// the tray comes back the way you left it.
 /// </summary>
 internal sealed class TrayApp : IDisposable
 {
-    private const int Port = 33389;
+    private const string SettingsKey = @"Software\MockRdp\Tray";
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RunValue = "MockRdpTray";
+    private static readonly string[] DefaultChannels = ["ECHO", "dvc::diag::inspector", "dvc::diag::files"];
 
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu = new();
@@ -25,10 +30,18 @@ internal sealed class TrayApp : IDisposable
     private RdpListener? _listener;
     private CancellationTokenSource? _cts;
 
-    private readonly ActivityLog _activityLog = new();   // captures the server log for the monitor
-    private readonly Desktop.VfsNode _sharedVfs = Desktop.Vfs.BuildDefault();   // one FS: session + browser
+    private readonly ActivityLog _activityLog = new();
+    private readonly Desktop.VfsNode _sharedVfs = Desktop.Vfs.BuildDefault();
     private LogWindow? _logWindow;
     private FileBrowserWindow? _filesWindow;
+
+    // ── settings (persisted) ───────────────────────────────────────────────
+    private int _port = 33389;
+    private bool _bindAny;                 // false = 127.0.0.1 only; true = 0.0.0.0 (LAN)
+    private bool _bootToDesktop;           // skip the fake logon screen
+    private bool _autoConnect;             // launch mstsc automatically when the server starts
+    private readonly HashSet<string> _channels = new(DefaultChannels, StringComparer.OrdinalIgnoreCase);
+    private readonly Redir _redir = new();
 
     private bool Running => _listener is not null;
 
@@ -42,27 +55,29 @@ internal sealed class TrayApp : IDisposable
         new("1920 × 1080", 1920, 1080),
     ];
 
-    // Which resources the generated .rdp asks mstsc to redirect. All on by default.
+    private static readonly int[] PortPresets = [3389, 3390, 33389, 33390];
+    private static readonly string[] KnownChannels = ["ECHO", "dvc::diag::inspector", "dvc::diag::files"];
+
     private sealed class Redir
     {
         public bool Drives = true, Clipboard = true, Printers = true, SmartCards = true, ComPorts = true, Audio = true;
     }
-
-    private readonly Redir _redir = new();
-    private bool _bootToDesktop;   // skip the fake logon screen and boot straight to the desktop
 
     private static string CertPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MockRdp", "dev-cert.pfx");
 
     public TrayApp()
     {
+        LoadSettings();
         _icon = new NotifyIcon { Icon = Branding.MakeIcon(16), Visible = true };
         BuildMenu();
         _icon.ContextMenuStrip = _menu;
         _icon.DoubleClick += (_, _) => Connect(Presets[0]);
         StartServer();
-        Balloon($"Mock RDP is running on 127.0.0.1:{Port}. Right-click the tray icon to connect.");
+        Balloon($"Mock RDP is running on {(_bindAny ? "0.0.0.0" : "127.0.0.1")}:{_port}. Right-click the tray icon to connect.");
     }
+
+    // ── menu ────────────────────────────────────────────────────────────────
 
     private void BuildMenu()
     {
@@ -78,12 +93,45 @@ internal sealed class TrayApp : IDisposable
             connect.DropDownItems.Add(new ToolStripMenuItem(preset.Label, null, (_, _) => Connect(preset)));
         _menu.Items.Add(connect);
 
-        // Redirections included in the .rdp — each is a live checkbox, all ticked by default.
+        // Port — presets plus a custom entry.
+        var portMenu = new ToolStripMenuItem("Port");
+        foreach (var p in PortPresets)
+        {
+            var item = new ToolStripMenuItem(p.ToString()) { CheckOnClick = false, Checked = p == _port, Tag = p };
+            item.Click += (_, _) => SetPort((int)item.Tag);
+            portMenu.DropDownItems.Add(item);
+        }
+        portMenu.DropDownItems.Add(new ToolStripSeparator());
+        portMenu.DropDownItems.Add(new ToolStripMenuItem("Custom…", null, (_, _) =>
+        {
+            var np = PromptPort(_port);
+            if (np is int v) SetPort(v);
+        }));
+        _menu.Items.Add(portMenu);
+
+        AddToggle("Listen on all interfaces (LAN)", () => _bindAny, v => { _bindAny = v; Save(); RestartServer(); UpdateStatus(); },
+            "Off: 127.0.0.1 only. On: 0.0.0.0, so other machines on your network can connect.");
+
+        // DVC channels the server opens.
+        var dvc = new ToolStripMenuItem("DVC channels");
+        foreach (var ch in KnownChannels)
+        {
+            var item = new ToolStripMenuItem(ch) { CheckOnClick = true, Checked = _channels.Contains(ch) };
+            item.CheckedChanged += (_, _) =>
+            {
+                if (item.Checked) _channels.Add(ch); else _channels.Remove(ch);
+                Save();
+                RestartServer();
+            };
+            dvc.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(dvc);
+
         var redir = new ToolStripMenuItem("Redirections (written to the .rdp)");
         void AddRedir(string label, Func<bool> get, Action<bool> set)
         {
             var item = new ToolStripMenuItem(label) { CheckOnClick = true, Checked = get() };
-            item.CheckedChanged += (_, _) => set(item.Checked);
+            item.CheckedChanged += (_, _) => { set(item.Checked); Save(); };
             redir.DropDownItems.Add(item);
         }
         AddRedir(@"Drives (\\tsclient)", () => _redir.Drives, v => _redir.Drives = v);
@@ -94,12 +142,17 @@ internal sealed class TrayApp : IDisposable
         AddRedir("Audio", () => _redir.Audio, v => _redir.Audio = v);
         _menu.Items.Add(redir);
 
-        var boot = new ToolStripMenuItem("Start at the desktop (skip logon)") { CheckOnClick = true, Checked = _bootToDesktop };
-        boot.ToolTipText = "Off: mstsc lands on the mock logon screen. On: it boots straight to the desktop.\n"
-                         + "(The mock is TLS-only and cannot do NLA — real NLA needs your password, so it's not offered.)";
-        boot.CheckedChanged += (_, _) => { _bootToDesktop = boot.Checked; RestartServer(); };
-        _menu.Items.Add(boot);
+        AddToggle("Start at the desktop (skip logon)", () => _bootToDesktop, v => { _bootToDesktop = v; Save(); RestartServer(); },
+            "Off: mstsc lands on the mock logon screen. On: it boots straight to the desktop.\n"
+            + "(The mock is TLS-only and cannot do NLA.)");
 
+        AddToggle("Auto-connect when the server starts", () => _autoConnect, v => { _autoConnect = v; Save(); },
+            "Launch Remote Desktop automatically whenever the server starts.");
+
+        AddToggle("Start Mock RDP at logon", IsRunAtLogon, SetRunAtLogon,
+            "Add/remove this tray app from the Windows startup (Run) key.");
+
+        _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Activity log…", null, (_, _) => ShowLog()));
         _menu.Items.Add(new ToolStripMenuItem("Browse server files…", null, (_, _) => ShowFiles()));
         _menu.Items.Add(new ToolStripMenuItem("Save .rdp to Desktop", null, (_, _) => SaveRdpToDesktop()));
@@ -108,32 +161,75 @@ internal sealed class TrayApp : IDisposable
         _menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => Exit()));
     }
 
+    private void AddToggle(string label, Func<bool> get, Action<bool> set, string? tip = null)
+    {
+        var item = new ToolStripMenuItem(label) { CheckOnClick = true, Checked = get() };
+        if (tip is not null) item.ToolTipText = tip;
+        item.CheckedChanged += (_, _) => set(item.Checked);
+        _menu.Items.Add(item);
+    }
+
+    private void SetPort(int port)
+    {
+        if (port == _port || port < 1 || port > 65535) return;
+        _port = port;
+        Save();
+        // refresh the checkmarks in the Port submenu
+        foreach (var top in _menu.Items)
+            if (top is ToolStripMenuItem { Text: "Port" } pm)
+                foreach (var d in pm.DropDownItems)
+                    if (d is ToolStripMenuItem { Tag: int tp } pi) pi.Checked = tp == _port;
+        RestartServer();
+        UpdateStatus();
+        Balloon($"Port set to {_port}.");
+    }
+
+    private static int? PromptPort(int current)
+    {
+        using var f = new Form
+        {
+            Text = "Mock RDP — port",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterScreen,
+            ClientSize = new Size(248, 96),
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+        };
+        var label = new Label { Text = "Listen on port:", Left = 14, Top = 14, AutoSize = true };
+        var num = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = current, Left = 16, Top = 36, Width = 210 };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Left = 68, Top = 64, Width = 75 };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Left = 150, Top = 64, Width = 75 };
+        f.Controls.AddRange([label, num, ok, cancel]);
+        f.AcceptButton = ok;
+        f.CancelButton = cancel;
+        return f.ShowDialog() == DialogResult.OK ? (int)num.Value : null;
+    }
+
     // ── server lifecycle ──────────────────────────────────────────────────
 
     private void StartServer()
     {
         if (Running) return;
-        // A stable dev cert (persisted) so its thumbprint doesn't change each launch — then pin it
-        // per-server in the registry so headless clients (mstscax) connect without a cert prompt.
         var cert = CertProvider.GetOrCreatePersistent(CertPath);
-        PinServerCert(cert.GetCertHash());
+        PinServerCert(cert.GetCertHash(), _port);
         _cts = new CancellationTokenSource();
-        // Open ECHO (for the DVC Console demo) plus RDPeek's diagnostics channels, so a registered
-        // RDPeek plugin connects and its Hello handshake is answered by the built-in diag responder.
-        _listener = new RdpListener(IPAddress.Loopback, Port, cert, _activityLog,
-            dvcChannels: ["ECHO", "dvc::diag::inspector", "dvc::diag::files"], rdpdrReads: null, dvcBehaviors: null,
+        var channels = _channels.Count > 0 ? _channels.ToArray() : DefaultChannels;
+        _listener = new RdpListener(_bindAny ? IPAddress.Any : IPAddress.Loopback, _port, cert, _activityLog,
+            dvcChannels: channels, rdpdrReads: null, dvcBehaviors: null,
             rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop,
             vfsRoot: _sharedVfs);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
         UpdateStatus();
+        if (_autoConnect) Connect(Presets[0]);
     }
 
-    /// <summary>Pins the server cert's SHA-1 hash per-server in the RDP client registry, so mstsc/
-    /// mstscax accept it for 127.0.0.1/localhost without prompting (no global Root-store trust).</summary>
-    private static void PinServerCert(byte[] certHash)
+    /// <summary>Pins the server cert's SHA-1 hash per-server so mstsc/mstscax accept it without a
+    /// prompt (no global Root-store trust).</summary>
+    private static void PinServerCert(byte[] certHash, int port)
     {
-        foreach (var server in new[] { "127.0.0.1", "localhost", $"127.0.0.1:{Port}", $"localhost:{Port}" })
+        foreach (var server in new[] { "127.0.0.1", "localhost", $"127.0.0.1:{port}", $"localhost:{port}" })
         {
             try
             {
@@ -147,7 +243,7 @@ internal sealed class TrayApp : IDisposable
 
     private void RestartServer()
     {
-        if (!Running) return;   // will pick up the new setting next time it starts
+        if (!Running) return;
         StopServer();
         StartServer();
     }
@@ -169,9 +265,10 @@ internal sealed class TrayApp : IDisposable
 
     private void UpdateStatus()
     {
-        _statusItem.Text = Running ? $"Server: running on :{Port}" : "Server: stopped";
+        string where = $"{(_bindAny ? "0.0.0.0" : "127.0.0.1")}:{_port}";
+        _statusItem.Text = Running ? $"Server: running on {where}" : "Server: stopped";
         _toggleItem.Text = Running ? "Stop server" : "Start server";
-        _icon.Text = Running ? $"Mock RDP — running on :{Port}" : "Mock RDP — stopped";
+        _icon.Text = Running ? $"Mock RDP — {where}" : "Mock RDP — stopped";
     }
 
     // ── client ────────────────────────────────────────────────────────────
@@ -196,7 +293,7 @@ internal sealed class TrayApp : IDisposable
     private string Rdp(Preset p)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"full address:s:127.0.0.1:{Port}");
+        sb.AppendLine($"full address:s:127.0.0.1:{_port}");
         sb.AppendLine("authentication level:i:2");
         sb.AppendLine("enablecredsspsupport:i:0");   // mock is TLS-only — never request NLA/CredSSP
         sb.AppendLine("prompt for credentials:i:0");
@@ -210,20 +307,17 @@ internal sealed class TrayApp : IDisposable
         sb.AppendLine($"redirectprinters:i:{(_redir.Printers ? 1 : 0)}");
         sb.AppendLine($"redirectsmartcards:i:{(_redir.SmartCards ? 1 : 0)}");
         sb.AppendLine($"redirectcomports:i:{(_redir.ComPorts ? 1 : 0)}");
-        sb.AppendLine($"audiomode:i:{(_redir.Audio ? 0 : 2)}");   // 0 = play on this computer (redirect), 2 = do not play
+        sb.AppendLine($"audiomode:i:{(_redir.Audio ? 0 : 2)}");
         return sb.ToString();
     }
 
     private string WriteRdp(Preset p)
     {
         var path = Path.Combine(Path.GetTempPath(), "mock-rdp-tray.rdp");
-        File.WriteAllText(path, Rdp(p), Encoding.ASCII);   // mstsc wants ASCII
+        File.WriteAllText(path, Rdp(p), Encoding.ASCII);
         return path;
     }
 
-    /// <summary>Installs the (stable) server cert into the user's Trusted Root store so headless
-    /// clients — the hosted mstscax control — connect without a cert warning. One-time: the cert is
-    /// persistent, so its thumbprint doesn't change across launches. Windows shows one confirm prompt.</summary>
     private void TrustCert()
     {
         try
@@ -235,7 +329,7 @@ internal sealed class TrayApp : IDisposable
             store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadWrite);
             store.Add(cert);
             store.Close();
-            Balloon("Server certificate trusted. Headless clients (the Bootstrap) now connect without a prompt.");
+            Balloon("Server certificate trusted. Headless clients now connect without a prompt.");
         }
         catch (Exception ex)
         {
@@ -244,7 +338,6 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
-    /// <summary>Open (or focus) the live activity monitor showing the server's log stream.</summary>
     private void ShowLog()
     {
         if (_logWindow is null || _logWindow.IsDisposed)
@@ -261,7 +354,6 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
-    /// <summary>Open (or focus) a browser of the mock's in-memory filesystem.</summary>
     private void ShowFiles()
     {
         if (_filesWindow is null || _filesWindow.IsDisposed)
@@ -283,6 +375,79 @@ internal sealed class TrayApp : IDisposable
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "mock-rdp.rdp");
         File.WriteAllText(path, Rdp(Presets[0]), Encoding.ASCII);
         Balloon("Saved " + path + " — double-click it to connect any time.");
+    }
+
+    // ── start-at-logon (Run key) ────────────────────────────────────────────
+
+    private static bool IsRunAtLogon()
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.OpenSubKey(RunKey);
+            return k?.GetValue(RunValue) is string;
+        }
+        catch { return false; }
+    }
+
+    private void SetRunAtLogon(bool on)
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.CreateSubKey(RunKey);
+            if (k is null) return;
+            if (on) k.SetValue(RunValue, $"\"{Application.ExecutablePath}\"");
+            else k.DeleteValue(RunValue, throwOnMissingValue: false);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Couldn't change the startup setting:\n" + ex.Message, "Mock RDP",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    // ── settings persistence ────────────────────────────────────────────────
+
+    private void LoadSettings()
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.OpenSubKey(SettingsKey);
+            if (k is null) return;
+            if (k.GetValue("Port") is int p && p is > 0 and < 65536) _port = p;
+            _bindAny = (k.GetValue("BindAny") as int?) == 1;
+            _bootToDesktop = (k.GetValue("BootToDesktop") as int?) == 1;
+            _autoConnect = (k.GetValue("AutoConnect") as int?) == 1;
+            if (k.GetValue("Channels") is string csv && csv.Length > 0)
+            {
+                _channels.Clear();
+                foreach (var c in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    _channels.Add(c);
+            }
+            if (k.GetValue("Redir") is int r)
+            {
+                _redir.Drives = (r & 1) != 0; _redir.Clipboard = (r & 2) != 0; _redir.Printers = (r & 4) != 0;
+                _redir.SmartCards = (r & 8) != 0; _redir.ComPorts = (r & 16) != 0; _redir.Audio = (r & 32) != 0;
+            }
+        }
+        catch { /* defaults are fine */ }
+    }
+
+    private void Save()
+    {
+        try
+        {
+            using var k = Registry.CurrentUser.CreateSubKey(SettingsKey);
+            if (k is null) return;
+            k.SetValue("Port", _port, RegistryValueKind.DWord);
+            k.SetValue("BindAny", _bindAny ? 1 : 0, RegistryValueKind.DWord);
+            k.SetValue("BootToDesktop", _bootToDesktop ? 1 : 0, RegistryValueKind.DWord);
+            k.SetValue("AutoConnect", _autoConnect ? 1 : 0, RegistryValueKind.DWord);
+            k.SetValue("Channels", string.Join(",", _channels), RegistryValueKind.String);
+            int r = (_redir.Drives ? 1 : 0) | (_redir.Clipboard ? 2 : 0) | (_redir.Printers ? 4 : 0)
+                  | (_redir.SmartCards ? 8 : 0) | (_redir.ComPorts ? 16 : 0) | (_redir.Audio ? 32 : 0);
+            k.SetValue("Redir", r, RegistryValueKind.DWord);
+        }
+        catch { /* best-effort */ }
     }
 
     // ── plumbing ──────────────────────────────────────────────────────────
