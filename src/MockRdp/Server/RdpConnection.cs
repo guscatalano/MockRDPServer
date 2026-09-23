@@ -25,7 +25,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null,
     Dictionary<string, string>? dvcBridges = null,
     Rdp.DvcPluginHost? plugins = null,
-    bool allowStandardRdpSecurity = true)
+    bool allowStandardRdpSecurity = true,
+    uint preferredRdpEncryption = Rdp.StandardSecurity.Method128Bit)
 {
     private bool _nlaRequested;
     // The security layer selected in X.224 negotiation. Ssl = TLS (enhanced security); Rdp =
@@ -296,21 +297,23 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested ({Names}).",
             channelCount, string.Join(", ", channels));
 
-        // Standard RDP Security: if the client offered RC4 and we're not on TLS, turn on encryption.
-        // b1 does 128-bit at level LOW (client→server encrypted; server→client stays in the clear).
+        // Standard RDP Security: if the client offered a method we support and we're not on TLS, turn
+        // on encryption. Level LOW (client→server encrypted; server→client stays in the clear).
         byte[]? serverCert = null;
         if (_selectedProtocol == RdpNegProtocol.Rdp && allowStandardRdpSecurity)
         {
             uint offered = Gcc.ReadClientEncryptionMethods(userData);
-            if ((offered & StandardSecurity.Method128Bit) != 0)
+            uint chosen = StandardSecurity.ChooseMethod(offered, preferredRdpEncryption);
+            if (chosen != 0)
             {
                 _rdpEncryption = true;
-                _encMethod = StandardSecurity.Method128Bit;
-                _encLevel = StandardSecurity.LevelLow;
+                _encMethod = chosen;
+                _encLevel = StandardSecurity.LevelLow;   // client→server encrypted; server→client clear
                 _serverRsaKey = StandardSecurity.ServerRsaKey.Generate();
                 _serverRandom = RandomNumberGenerator.GetBytes(32);
                 serverCert = StandardSecurity.BuildProprietaryCertificate(_serverRsaKey);
-                log.LogInformation("Standard RDP Security: 128-bit RC4, level LOW (client offered 0x{O:X8}).", offered);
+                log.LogInformation("Standard RDP Security: {Method}, level {Level} (client offered 0x{O:X8}).",
+                    StandardSecurity.MethodName(chosen), _encLevel, offered);
             }
             else
                 log.LogInformation("Standard RDP Security: client offered methods 0x{O:X8}; running with encryption NONE.", offered);
@@ -406,7 +409,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             var mac = sendData.Slice(4, 8);
             body = sendData.Slice(12).ToArray();
             bool salted = (flags & StandardSecurity.SecSecureChecksum) != 0;
-            if (!_sessionKeys!.DecryptVerify(body, mac, salted))
+            if (!_sessionKeys!.DecryptVerify(body, mac, salted) && _encMethod == StandardSecurity.Method128Bit)
                 log.LogWarning("Standard RDP Security: inbound MAC verification failed.");
         }
         else
@@ -1486,7 +1489,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             var mac = payload.AsSpan(0, 8);
             var body = payload.AsSpan(8).ToArray();
             bool salted = (fastPathHeader & 0x40) != 0;   // FASTPATH_INPUT_SECURE_CHECKSUM
-            if (!_sessionKeys!.DecryptVerify(body, mac, salted))
+            if (!_sessionKeys!.DecryptVerify(body, mac, salted) && _encMethod == StandardSecurity.Method128Bit)
                 log.LogWarning("Standard RDP Security: fast-path input MAC verification failed.");
             payload = body;
         }

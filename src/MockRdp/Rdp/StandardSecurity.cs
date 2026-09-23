@@ -38,6 +38,31 @@ public static class StandardSecurity
     private static readonly byte[] Pad1 = Enumerable.Repeat((byte)0x36, 40).ToArray();
     private static readonly byte[] Pad2 = Enumerable.Repeat((byte)0x5C, 48).ToArray();
 
+    // The RC4 methods the server can actually speak. FIPS (3DES) is not yet implemented, so it is
+    // never selected even if a client offers it — the server falls back to the strongest RC4.
+    private const uint SupportedMethods = Method40Bit | Method56Bit | Method128Bit;
+
+    /// <summary>Chooses the encryption method given what the client offered and the server's preference.
+    /// Uses the preferred method when it is supported and offered; otherwise falls back to the strongest
+    /// supported RC4 method offered. 0 = none (run in the clear).</summary>
+    public static uint ChooseMethod(uint offered, uint preferred)
+    {
+        if ((preferred & SupportedMethods) != 0 && (offered & preferred) != 0) return preferred;
+        if ((offered & Method128Bit) != 0) return Method128Bit;
+        if ((offered & Method56Bit) != 0) return Method56Bit;
+        if ((offered & Method40Bit) != 0) return Method40Bit;
+        return 0;
+    }
+
+    public static string MethodName(uint m) => m switch
+    {
+        Method40Bit => "40-bit RC4",
+        Method128Bit => "128-bit RC4",
+        Method56Bit => "56-bit RC4",
+        MethodFips => "FIPS (3DES)",
+        _ => "none",
+    };
+
     // ---- Terminal Services well-known signing key (MS-RDPBCGR 5.3.3.1.1) -------------------------
     // Clients validate a Proprietary Server Certificate's signature against this public key, so the
     // server must sign with the matching private exponent. All little-endian, 64-byte (512-bit).
@@ -160,11 +185,10 @@ public static class StandardSecurity
             SaltedHash(master, "YY"u8, clientRandom, serverRandom, sessionBlob.AsSpan(16, 16));
             SaltedHash(master, "ZZZ"u8, clientRandom, serverRandom, sessionBlob.AsSpan(32, 16));
 
-            _macKey = sessionBlob[0..16];
-
             // MS-RDPBCGR 5.3.5.1: MACKey = blob[0..16], client *decrypt* key = FinalHash(blob[16..32]),
             // client *encrypt* key = FinalHash(blob[32..48]). The server decrypts client→server with
             // the client's *encrypt* key, so we derive from the third 128 bits.
+            _macKey = sessionBlob[0..16];
             _initialDecryptKey = FinalHash(sessionBlob.AsSpan(32, 16), clientRandom, serverRandom);
             _decryptKey = (byte[])_initialDecryptKey.Clone();
             Salt(_decryptKey, method);

@@ -207,10 +207,25 @@ var pluginHost = pluginPaths.Count > 0
     ? MockRdp.Rdp.DvcPluginHost.Load(pluginPaths, loggerFactory.CreateLogger("DvcPlugins"))
     : null;
 
+// --enc <128|56|40|none>: Standard RDP Security method to prefer when a PROTOCOL_RDP client offers
+// it (default 128-bit RC4, the only fully MAC-verified method). `none` accepts PROTOCOL_RDP but
+// runs in the clear. 40/56-bit connect and decrypt correctly but are not strictly MAC-verified.
+uint preferredEnc = MockRdp.Rdp.StandardSecurity.Method128Bit;
+int encIdx = Array.IndexOf(args, "--enc");
+if (encIdx >= 0 && encIdx + 1 < args.Length)
+    preferredEnc = args[encIdx + 1].ToLowerInvariant() switch
+    {
+        "40" => MockRdp.Rdp.StandardSecurity.Method40Bit,
+        "56" => MockRdp.Rdp.StandardSecurity.Method56Bit,
+        "128" => MockRdp.Rdp.StandardSecurity.Method128Bit,
+        "none" => 0u,
+        _ => MockRdp.Rdp.StandardSecurity.Method128Bit,
+    };
+
 using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
     rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"),
     dvcBridges: dvcBridges.Count > 0 ? dvcBridges : null,
-    plugins: pluginHost);
+    plugins: pluginHost, preferredRdpEncryption: preferredEnc);
 listener.Start();
 
 using var cts = new CancellationTokenSource();

@@ -13,6 +13,29 @@ namespace MockRdp.Tests;
 public class StandardSecurityTests
 {
     [Fact]
+    public void ChooseMethod_PrefersConfiguredThenStrongestSupported()
+    {
+        const uint m40 = StandardSecurity.Method40Bit, m56 = StandardSecurity.Method56Bit,
+                   m128 = StandardSecurity.Method128Bit, fips = StandardSecurity.MethodFips;
+        uint all = m40 | m56 | m128 | fips;
+
+        // Preferred method wins when the client offers it.
+        Assert.Equal(m40, StandardSecurity.ChooseMethod(all, m40));
+        Assert.Equal(m128, StandardSecurity.ChooseMethod(all, m128));
+
+        // FIPS is never selected (not implemented) — falls back to the strongest RC4 offered.
+        Assert.Equal(m128, StandardSecurity.ChooseMethod(all, fips));
+
+        // Preferred not offered → strongest supported offered.
+        Assert.Equal(m56, StandardSecurity.ChooseMethod(m40 | m56, m128));
+        Assert.Equal(m40, StandardSecurity.ChooseMethod(m40, m128));
+
+        // Nothing offered → none.
+        Assert.Equal(0u, StandardSecurity.ChooseMethod(0, m128));
+        Assert.Equal(0u, StandardSecurity.ChooseMethod(fips, m128)); // only FIPS offered, unsupported
+    }
+
+    [Fact]
     public void Rc4_MatchesKnownAnswerVector()
     {
         // Classic RC4 test vector: key "Key", plaintext "Plaintext" -> BBF316E8D940AF0AD3.
