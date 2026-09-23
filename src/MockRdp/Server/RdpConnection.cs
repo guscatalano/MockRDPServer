@@ -30,6 +30,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     // RunAsync loop reads/writes, mirroring a real WTSVirtualChannelRead/Write agent.
     private readonly Rdp.DvcPluginHost? _plugins = plugins;
     private readonly Dictionary<uint, Rdp.DvcChannelPipe> _dvcHandlers = new();
+    private readonly Random _chaosRng = new();
     // DVC bridge: channel name -> "host:port" of a real agent (rdpeek-agent serve-tcp). When set, the
     // mock relays the channel's bytes to/from that endpoint instead of answering itself.
     private readonly Dictionary<string, string> _bridges = dvcBridges ?? new();
@@ -882,6 +883,19 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("DVC: create request for '{Name}' (id {Id}).", name, id);
     }
 
+    /// <summary>Tear a DVC down mid-session: close it to the client and drop any plugin/bridge state.
+    /// Used by "DVC Chaos" (random) and the force-fail action.</summary>
+    private async Task FailDvcChannelAsync(uint channelId, string name, string why, CancellationToken ct)
+    {
+        LogChannel(DvcLabel(name), false, 0, why);
+        log.LogWarning("{Why}: '{Name}' (id {Id}).", why, name, channelId);
+        _dvcOpen.Remove(channelId);
+        _dvcReasm.Remove(channelId);
+        if (_dvcHandlers.Remove(channelId, out var pipe)) pipe.Complete();
+        if (_bridgeStreams.Remove(channelId, out var bs)) { try { bs.Dispose(); } catch { } }
+        try { await SendDvcAsync(Dvc.BuildClose(channelId), ct); } catch { /* client already gone */ }
+    }
+
     /// <summary>Wire an opened plugin channel to its RunAsync loop: a pipe fed by the receive loop,
     /// and a write delegate that fragments + sends. Runs the plugin on a background task.</summary>
     private void StartPluginChannel(MockRdp.Plugin.IServerDvcPlugin plugin, uint channelId, string name, CancellationToken ct)
@@ -954,6 +968,25 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
 
         var name = _dvcOpen[msg.ChannelId];
+
+        // In-session "DVC Chaos": randomly fail this message on any channel (drop / close / delay).
+        if (_desktop?.Chaos is { Enabled: true } chaos && _chaosRng.Next(100) < chaos.Percent)
+        {
+            switch (_chaosRng.Next(3))
+            {
+                case 0:
+                    LogChannel(DvcLabel(name), true, complete.Length, "CHAOS drop");
+                    log.LogWarning("CHAOS: dropped {N} B on '{Name}' (id {Id}).", complete.Length, name, msg.ChannelId);
+                    return;
+                case 1:
+                    await FailDvcChannelAsync(msg.ChannelId, name, "CHAOS close", ct);
+                    return;
+                default:
+                    log.LogWarning("CHAOS: delaying '{Name}' (id {Id}) 1.5s.", name, msg.ChannelId);
+                    await Task.Delay(1500, ct);
+                    break;   // fall through to normal handling after the delay
+            }
+        }
 
         // Server-side DVC plugin: hand the complete message to its RunAsync loop (it writes replies back).
         if (_dvcHandlers.TryGetValue(msg.ChannelId, out var pipe))
@@ -1360,6 +1393,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // The user typed into a DVC Console — open the channel (if needed) and send the text.
         foreach (var (channel, text) in _desktop.TakeDvcSends())
             await SendDvcConsoleAsync(channel, text, ct);
+
+        // The user clicked "Fail" on a channel in the DVC Chaos window — tear that one down now.
+        foreach (var ch in _desktop.TakeChaosKills())
+        {
+            var open = _dvcOpen.FirstOrDefault(o => string.Equals(o.Value, ch, StringComparison.OrdinalIgnoreCase));
+            if (open.Value == ch) await FailDvcChannelAsync(open.Key, ch, "forced fail", ct);
+        }
 
         // The user just signed in at the logon screen — send the Server Save Session Info
         // ("logon") PDU (MS-RDPBCGR 2.2.10.1) before painting the desktop, as a real host would.

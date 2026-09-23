@@ -241,6 +241,18 @@ MockRdpCli --desktop --plugin samples/UppercaseDvcPlugin/bin/Release/net10.0/Upp
 …or from the **tray**: *Server-side DVC plugin → Load plugin DLL…* (the path persists). `samples/UppercaseDvcPlugin`
 is a complete, copy-me example (opens `SAMPLE::upper`, greets, echoes upper-cased).
 
+### Fail DVCs from inside the session
+
+Open **DVC Chaos** from the Start menu (or the tray's desktop) to break channels live — for testing
+how a client plugin/agent copes:
+
+- **Random chaos**: toggle on and set a percentage; each DVC message then has that chance to be
+  **dropped, delayed, or have its channel closed**, across every channel (echo, diag, bridged, plugin).
+- **Force-fail a specific channel**: the window lists the open DVCs, each with a **Fail** button that
+  tears that one down now.
+
+(Set faults at launch instead with `--dvc-fault <channel>=<fragment|drop|close|truncate|delay>`.)
+
 ## CI & prebuilt binary
 
 `.github/workflows/ci.yml` builds and tests on every push/PR and publishes **self-contained

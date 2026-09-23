@@ -32,7 +32,7 @@ public sealed class FakeDesktop : IDisposable
     public string FocusedText => Focused?.Body ?? "";
     public bool IsDragging => _drag is not null;
 
-    private enum WinKind { Generic, Explorer, Notepad, Run, Stats, Display, DvcMon, DvcApp }
+    private enum WinKind { Generic, Explorer, Notepad, Run, Stats, Display, DvcMon, DvcApp, Chaos }
 
     private sealed class Win
     {
@@ -73,6 +73,22 @@ public sealed class FakeDesktop : IDisposable
     /// <summary>Whether the client redirected its clipboard (the cliprdr channel is open). Used to
     /// warn in-session when the user tries to copy/paste a file but redirection is off.</summary>
     public Func<bool>? ClipboardAvailable;
+
+    /// <summary>Runtime chaos knob toggled from the in-session "DVC Chaos" window: when Enabled, the
+    /// host fails a <see cref="ChaosState.Percent"/> chance of each DVC message (drop / delay / close).</summary>
+    public sealed class ChaosState { public bool Enabled; public int Percent = 25; }
+    public ChaosState Chaos { get; } = new();
+
+    /// <summary>Channels the user clicked "Fail" on in the DVC Chaos window — the host tears them down.
+    /// Read-and-clear.</summary>
+    private readonly List<string> _chaosKills = new();
+    public IReadOnlyList<string> TakeChaosKills()
+    {
+        if (_chaosKills.Count == 0) return [];
+        var copy = _chaosKills.ToArray();
+        _chaosKills.Clear();
+        return copy;
+    }
 
     /// <summary>True while a live window (Connection Info / DVC Monitor) is open, so the host ticks
     /// faster and keeps its contents fresh.</summary>
@@ -201,7 +217,7 @@ public sealed class FakeDesktop : IDisposable
     private const int TitleH = 30;
     private const int CloseW = 30;
     private const int StartW = 92;
-    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "Channel Monitor", "DVC Console", "Settings", "Run…"];
+    private static readonly string[] MenuItems = ["File Explorer", "Notepad", "Connection Info", "Display", "Channel Monitor", "DVC Console", "DVC Chaos", "Settings", "Run…"];
     private const int MenuW = 240;
     private const int MenuRow = 36;
 
@@ -514,7 +530,8 @@ public sealed class FakeDesktop : IDisposable
                 bool acted = (w.Kind == WinKind.Explorer && ExplorerClick(w, x, y))
                           || (w.Kind == WinKind.Display && DisplayClick(w, x, y))
                           || (w.Kind == WinKind.DvcApp && DvcAppClick(w, x, y))
-                          || (w.Kind == WinKind.DvcMon && DvcMonClick(w, x, y));
+                          || (w.Kind == WinKind.DvcMon && DvcMonClick(w, x, y))
+                          || (w.Kind == WinKind.Chaos && ChaosClick(w, x, y));
                 return raised || acted;
             }
         }
@@ -662,6 +679,7 @@ public sealed class FakeDesktop : IDisposable
             case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
             case "Channel Monitor": Open(new Win { Kind = WinKind.DvcMon, Title = "Channel Monitor — input · graphics · SVC · DVC", W = 640, H = 400 }); break;
             case "DVC Console": Open(new Win { Kind = WinKind.DvcApp, Title = "DVC Console — send on a channel", W = 440, H = 230 }); break;
+            case "DVC Chaos": Open(new Win { Kind = WinKind.Chaos, Title = "DVC Chaos — fail channels", W = 440, H = 340 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
         }
@@ -763,6 +781,7 @@ public sealed class FakeDesktop : IDisposable
             case WinKind.Display: DrawDisplay(ctx, w); break;
             case WinKind.DvcMon: DrawDvcMon(ctx, w); break;
             case WinKind.DvcApp: DrawDvcApp(ctx, w, focused); break;
+            case WinKind.Chaos: DrawChaos(ctx, w); break;
             default:
             {
                 int ly = w.Y + TitleH + 18;
@@ -895,6 +914,64 @@ public sealed class FakeDesktop : IDisposable
 
         Text(ctx, _small, "Opens a dynamic virtual channel of that name and sends your text.", w.X + 14, w.Y + TitleH + 118, Color.ParseHex("707070"));
         Text(ctx, _small, "Open DVC Monitor to watch it flow.", w.X + 14, w.Y + TitleH + 136, Color.ParseHex("707070"));
+    }
+
+    private static int[] ChaosToggle(Win w) => [w.X + 16, w.Y + TitleH + 86, 150, 32];
+    private static int[] ChaosMinus(Win w) => [w.X + 180, w.Y + TitleH + 86, 44, 32];
+    private static int[] ChaosPlus(Win w) => [w.X + 230, w.Y + TitleH + 86, 44, 32];
+    private static int[] ChaosFailRect(Win w, int index) => [w.X + w.W - 74, w.Y + TitleH + 150 + index * 26, 56, 22];
+
+    private bool ChaosClick(Win w, int x, int y)
+    {
+        if (InRect(x, y, ChaosToggle(w))) { Chaos.Enabled = !Chaos.Enabled; Emit(Chaos.Enabled ? $"DVC chaos ON ({Chaos.Percent}%)" : "DVC chaos OFF"); return true; }
+        if (InRect(x, y, ChaosMinus(w))) { Chaos.Percent = Math.Max(5, Chaos.Percent - 10); return true; }
+        if (InRect(x, y, ChaosPlus(w))) { Chaos.Percent = Math.Min(100, Chaos.Percent + 10); return true; }
+
+        // Force-fail a specific open channel: hit-test the "Fail" button on each listed row.
+        var channels = DvcChannels?.Invoke() ?? [];
+        for (int i = 0; i < channels.Count && i < 5; i++)
+            if (InRect(x, y, ChaosFailRect(w, i)))
+            {
+                _chaosKills.Add(channels[i]);
+                Emit($"Force-failing DVC '{channels[i]}'");
+                return true;
+            }
+        return false;
+    }
+
+    private void DrawChaos(IImageProcessingContext ctx, Win w)
+    {
+        Fill(ctx, "FFFFFF", w.X + 6, w.Y + TitleH + 6, w.W - 12, w.H - TitleH - 12);
+        Text(ctx, _small, "Randomly fail dynamic virtual channels.", w.X + 14, w.Y + TitleH + 12, Color.ParseHex("303030"));
+        Text(ctx, _small, "Each DVC message gets a chance to be dropped,", w.X + 14, w.Y + TitleH + 34, Color.ParseHex("707070"));
+        Text(ctx, _small, "delayed, or have its channel closed — resilience testing.", w.X + 14, w.Y + TitleH + 50, Color.ParseHex("707070"));
+
+        string state = Chaos.Enabled ? $"CHAOS ON — {Chaos.Percent}% of messages" : "CHAOS OFF";
+        Text(ctx, _small, state, w.X + 16, w.Y + TitleH + 66, Color.ParseHex(Chaos.Enabled ? "B00020" : "308030"));
+
+        var tgl = ChaosToggle(w);
+        Fill(ctx, Chaos.Enabled ? "B00020" : "308030", tgl[0], tgl[1], tgl[2], tgl[3]);
+        Text(ctx, _small, Chaos.Enabled ? "Turn OFF" : "Turn ON", tgl[0] + 20, tgl[1] + 8, Color.ParseHex("FFFFFF"));
+
+        var mn = ChaosMinus(w);
+        Fill(ctx, "DDDDDD", mn[0], mn[1], mn[2], mn[3]);
+        Text(ctx, _small, "-10", mn[0] + 8, mn[1] + 8, Color.ParseHex("101010"));
+        var pl = ChaosPlus(w);
+        Fill(ctx, "DDDDDD", pl[0], pl[1], pl[2], pl[3]);
+        Text(ctx, _small, "+10", pl[0] + 8, pl[1] + 8, Color.ParseHex("101010"));
+
+        // Force-fail a specific channel: list the open DVCs, each with a red Fail button.
+        Text(ctx, _small, "Force-fail a channel:", w.X + 14, w.Y + TitleH + 130, Color.ParseHex("505050"));
+        var channels = DvcChannels?.Invoke() ?? [];
+        if (channels.Count == 0)
+            Text(ctx, _small, "(no DVCs open yet)", w.X + 20, w.Y + TitleH + 152, Color.ParseHex("909090"));
+        for (int i = 0; i < channels.Count && i < 5; i++)
+        {
+            var fr = ChaosFailRect(w, i);
+            Text(ctx, _small, channels[i], w.X + 20, fr[1] + 4, Color.ParseHex("101010"));
+            Fill(ctx, "B00020", fr[0], fr[1], fr[2], fr[3]);
+            Text(ctx, _small, "Fail", fr[0] + 14, fr[1] + 4, Color.ParseHex("FFFFFF"));
+        }
     }
 
     private void DrawStats(IImageProcessingContext ctx, Win w)

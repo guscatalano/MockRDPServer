@@ -76,7 +76,7 @@ public class DesktopInputTests
         Assert.Equal(1, d.WindowCount);
 
         d.OnInput(LeftClick(10, 748));               // open Start menu
-        Assert.True(d.OnInput(LeftClick(20, 448)));  // click the first menu item (File Explorer)
+        Assert.True(d.OnInput(LeftClick(20, 412)));  // click the first menu item (File Explorer)
         Assert.Equal(2, d.WindowCount);              // a window launched
 
         // Drag the launched window by its title bar (press → move → release).
@@ -90,7 +90,7 @@ public class DesktopInputTests
     {
         using var d = new FakeDesktop(1024, 768);
         d.OnInput(LeftClick(10, 748));               // Start
-        d.OnInput(LeftClick(20, 448));               // File Explorer (opens at the user's home)
+        d.OnInput(LeftClick(20, 412));               // File Explorer (opens at the user's home)
         Assert.Equal(2, d.WindowCount);
 
         // Rows now: \\tsclient(196), ..(218), Documents(240) — click Documents, then readme.txt.
@@ -107,7 +107,7 @@ public class DesktopInputTests
     {
         using var d = new FakeDesktop(1024, 768);
         d.OnInput(LeftClick(10, 748));               // Start
-        d.OnInput(LeftClick(20, 448));               // File Explorer (home)
+        d.OnInput(LeftClick(20, 412));               // File Explorer (home)
         d.OnInput(LeftClick(250, 250));              // into Documents
         d.OnInput(LeftClick(250, 250));              // single-click readme.txt → selects (no window)
         Assert.Equal(2, d.WindowCount);
@@ -144,7 +144,7 @@ public class DesktopInputTests
         Assert.False(d.WantsLiveTick);
 
         d.OnInput(LeftClick(10, 748));               // Start
-        d.OnInput(LeftClick(20, 520));               // Connection Info (3rd item)
+        d.OnInput(LeftClick(20, 484));               // Connection Info (3rd item)
 
         Assert.Equal(2, d.WindowCount);
         Assert.Equal("Connection Info", d.FocusedTitle);
@@ -158,7 +158,7 @@ public class DesktopInputTests
         Assert.Null(d.TakeRequestedResize());
 
         d.OnInput(LeftClick(10, 748));               // Start
-        d.OnInput(LeftClick(20, 555));               // Display (4th item)
+        d.OnInput(LeftClick(20, 519));               // Display (4th item)
         Assert.Equal("Display settings", d.FocusedTitle);
 
         // Window opens at X=186,Y=136 (2nd window). Rows start at Y+30+34=200, each 34px.
@@ -175,7 +175,7 @@ public class DesktopInputTests
     public void Keyboard_TypesIntoNotepad()
     {
         using var d = new FakeDesktop(1024, 768);
-        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 484)); // Start → Notepad
+        d.OnInput(LeftClick(10, 748)); d.OnInput(LeftClick(20, 448)); // Start → Notepad
         Type(d, "hi");
         Assert.Equal("hi", d.FocusedText);
     }
