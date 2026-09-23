@@ -76,4 +76,53 @@ public class EncryptedHandshakeTests
         Assert.Equal(ShareControl.Data & 0x0F, ShareControl.PduType(fin.Payload.AsSpan(4)));
         Assert.Equal(Finalization.Pdu2Synchronize, Finalization.DataPduType2(fin.Payload.AsSpan(4)));
     }
+
+    [Fact]
+    public async Task StandardRdpSecurity_HighLevel_EncryptsBothDirections()
+    {
+        using var server = new MockServerFixture(desktop: true, rdpHighEncryption: true);
+        await using var client = new RdpTestClient();
+        var ct = Timeout;
+
+        await client.ConnectAsync(server.Endpoint, ct);
+        await client.SendConnectionRequestAsync(RdpNegProtocol.Rdp, ct: ct);
+        await client.ReadConnectionConfirmAsync(ct);
+
+        await client.WriteRawAsync(
+            McsClient.BuildConnectInitial(StandardSecurity.Method128Bit, "cliprdr", "drdynvc"), ct);
+        var connectResp = await client.ReadTpktPayloadAsync(ct);
+        var crypto = new RdpCryptoClient(connectResp, StandardSecurity.Method128Bit);
+        var (io, ids) = McsClient.ParseConnectResponseNetwork(connectResp);
+
+        await client.WriteRawAsync(McsClient.ErectDomainRequest(), ct);
+        await client.WriteRawAsync(McsClient.AttachUserRequest(), ct);
+        ushort user = McsClient.ParseAttachUserConfirm(await client.ReadTpktPayloadAsync(ct));
+        foreach (var ch in new[] { user, io }.Concat(ids))
+        {
+            await client.WriteRawAsync(McsClient.ChannelJoinRequest(user, ch), ct);
+            await client.ReadTpktPayloadAsync(ct);
+        }
+
+        await client.WriteRawAsync(crypto.SecurityExchange(user), ct);
+        await client.WriteRawAsync(crypto.EncryptClientInfo(user), ct);
+
+        // At HIGH the server→client PDUs are encrypted too — the client must decrypt them.
+        var lic = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
+        var (_, licFlags) = crypto.DecryptServerPdu(lic.Payload);
+        Assert.True((licFlags & StandardSecurity.SecLicensePkt) != 0);   // encrypted licensing
+        Assert.True((licFlags & StandardSecurity.SecEncrypt) != 0);
+
+        var demand = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
+        var (demandPdu, _) = crypto.DecryptServerPdu(demand.Payload);
+        Assert.Equal(ShareControl.DemandActive & 0x0F, ShareControl.PduType(demandPdu));
+
+        await client.WriteRawAsync(
+            crypto.Encrypt(user, Gcc.IoChannelId, McsClient.BuildConfirmActivePdu(user, Capabilities.ShareId)), ct);
+        await client.WriteRawAsync(
+            crypto.Encrypt(user, Gcc.IoChannelId, McsClient.BuildFontListPdu()), ct);
+
+        var fin = McsPdu.ParseSendData(Cotp.StripDataTpdu(await client.ReadTpktPayloadAsync(ct)));
+        var (finPdu, _) = crypto.DecryptServerPdu(fin.Payload);
+        Assert.Equal(Finalization.Pdu2Synchronize, Finalization.DataPduType2(finPdu));
+    }
 }

@@ -22,6 +22,8 @@ public sealed class RdpCryptoClient
     private readonly byte[] _modLE, _expLE;
     private readonly StandardSecurity.Rc4 _rc4;
     private uint _count;
+    private readonly StandardSecurity.Rc4 _decRc4;   // server→client (HIGH)
+    private uint _decCount;
 
     public byte[] ClientRandom { get; } = RandomNumberGenerator.GetBytes(32);
     public byte[] ServerRandom { get; }
@@ -32,10 +34,25 @@ public sealed class RdpCryptoClient
         ServerRandom = serverRandom;
         (_modLE, _expLE) = StandardSecurity.ParsePublicKeyFromProprietaryCert(cert);
 
-        var (mac, clientEncrypt, _) = StandardSecurity.DeriveKeys(ClientRandom, ServerRandom, method);
+        var (mac, clientEncrypt, clientDecrypt) = StandardSecurity.DeriveKeys(ClientRandom, ServerRandom, method);
         _macKey = mac;
         int keyLen = method == StandardSecurity.Method128Bit ? 16 : 8;
         _rc4 = new StandardSecurity.Rc4(clientEncrypt.AsSpan(0, keyLen));
+        _decRc4 = new StandardSecurity.Rc4(clientDecrypt.AsSpan(0, keyLen));
+    }
+
+    /// <summary>Decrypts a server→client Send Data payload. At ENCRYPTION_LEVEL_HIGH the body is RC4
+    /// encrypted behind an 8-byte MAC; at LOW the security header is present but unencrypted. Returns
+    /// the inner PDU (header stripped) and the security-header flags.</summary>
+    public (byte[] Pdu, ushort Flags) DecryptServerPdu(ReadOnlySpan<byte> sendDataPayload)
+    {
+        ushort flags = (ushort)(sendDataPayload[0] | sendDataPayload[1] << 8);
+        if ((flags & SecEncrypt) == 0)
+            return (sendDataPayload[4..].ToArray(), flags);   // LOW: basic header, no encryption
+        var body = sendDataPayload[12..].ToArray();
+        _decRc4.Process(body);
+        _decCount++;
+        return (body, flags);
     }
 
     /// <summary>The Security Exchange PDU: the RSA-encrypted client random (MS-RDPBCGR 2.2.1.10).</summary>

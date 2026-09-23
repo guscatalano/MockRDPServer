@@ -13,12 +13,13 @@ public sealed class MockServerFixture : IDisposable
 
     public MockServerFixture(string[]? dvcChannels = null,
         Dictionary<string, MockRdp.Rdp.Dvc.Behavior>? dvcBehaviors = null, bool desktop = false,
-        MockRdp.Rdp.DvcPluginHost? plugins = null, bool allowStandardRdpSecurity = true)
+        MockRdp.Rdp.DvcPluginHost? plugins = null, bool allowStandardRdpSecurity = true,
+        bool rdpHighEncryption = false)
     {
         var cert = CertProvider.CreateSelfSigned();
         _listener = new RdpListener(IPAddress.Loopback, 0, cert, NullLoggerFactory.Instance,
             dvcChannels, null, dvcBehaviors, null, null, desktop, plugins: plugins,
-            allowStandardRdpSecurity: allowStandardRdpSecurity);
+            allowStandardRdpSecurity: allowStandardRdpSecurity, rdpHighEncryption: rdpHighEncryption);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
     }

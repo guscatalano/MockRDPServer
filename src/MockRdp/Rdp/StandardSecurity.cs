@@ -165,6 +165,11 @@ public static class StandardSecurity
         private Rc4 _decryptRc4;
         private int _decryptUses;          // resets every 4096 packets (key-update cadence)
         private uint _decryptChecksumCount; // monotonic; salts the secure-checksum MAC
+        private readonly byte[] _initialEncryptKey;  // server→client (level HIGH); pre-salt
+        private byte[] _encryptKey;
+        private Rc4 _encryptRc4;
+        private int _encryptUses;
+        private uint _encryptChecksumCount;
 
         public SessionKeys(byte[] clientRandom, byte[] serverRandom, uint method)
         {
@@ -194,6 +199,35 @@ public static class StandardSecurity
             _decryptKey = (byte[])_initialDecryptKey.Clone();
             Salt(_decryptKey, method);
             _decryptRc4 = new Rc4(_decryptKey.AsSpan(0, _rc4KeyLen));
+
+            // Encrypt direction (server→client, used at ENCRYPTION_LEVEL_HIGH): the server encrypts with
+            // the client's *decrypt* key = FinalHash(blob[16..32]).
+            _initialEncryptKey = FinalHash(sessionBlob.AsSpan(16, 16), clientRandom, serverRandom);
+            _encryptKey = (byte[])_initialEncryptKey.Clone();
+            Salt(_encryptKey, method);
+            _encryptRc4 = new Rc4(_encryptKey.AsSpan(0, _rc4KeyLen));
+        }
+
+        /// <summary>Encrypts an outbound (server→client) PDU body in place and returns its 8-byte MAC —
+        /// the mirror of <see cref="DecryptVerify"/>, used at ENCRYPTION_LEVEL_HIGH.</summary>
+        public byte[] EncryptSign(Span<byte> body, bool salted = true)
+        {
+            if (_encryptUses == 4096) { UpdateEncryptKey(); _encryptUses = 0; }
+            _encryptUses++;
+            var mac = new byte[8];
+            if (salted) ComputeSaltedMac(_macKey, body, _encryptChecksumCount, mac);
+            else ComputeMac(_macKey, body, mac);
+            _encryptChecksumCount++;
+            _encryptRc4.Process(body);
+            return mac;
+        }
+
+        private void UpdateEncryptKey()
+        {
+            var next = UpdatedKey(_initialEncryptKey, _encryptKey, _rc4KeyLen);
+            Salt(next, _method);
+            _encryptKey = next;
+            _encryptRc4 = new Rc4(_encryptKey.AsSpan(0, _rc4KeyLen));
         }
 
         /// <summary>Decrypts an inbound (client→server) encrypted PDU body in place and verifies its

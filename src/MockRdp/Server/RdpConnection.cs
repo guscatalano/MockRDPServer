@@ -26,7 +26,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     Dictionary<string, string>? dvcBridges = null,
     Rdp.DvcPluginHost? plugins = null,
     bool allowStandardRdpSecurity = true,
-    uint preferredRdpEncryption = Rdp.StandardSecurity.Method128Bit)
+    uint preferredRdpEncryption = Rdp.StandardSecurity.Method128Bit,
+    bool rdpHighEncryption = false)
 {
     private bool _nlaRequested;
     // The security layer selected in X.224 negotiation. Ssl = TLS (enhanced security); Rdp =
@@ -254,8 +255,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             await WriteAsync(cr.HasNegReq
                 ? Cotp.BuildConnectionConfirm(RdpNegProtocol.Rdp, negRspFlags: 0x01)
                 : Cotp.BuildConnectionConfirmPlain(), ct);
-            log.LogInformation("Sent Connection Confirm selecting PROTOCOL_RDP (Standard RDP Security, " +
-                "encryption NONE); no TLS handshake.");
+            log.LogInformation("Sent Connection Confirm selecting PROTOCOL_RDP (Standard RDP Security); " +
+                "no TLS handshake. Encryption method/level are chosen next, from the client's GCC.");
             await RunMcsAsync(ct);
             return;
         }
@@ -357,7 +358,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             {
                 _rdpEncryption = true;
                 _encMethod = chosen;
-                _encLevel = StandardSecurity.LevelLow;   // client→server encrypted; server→client clear
+                // LOW: only client→server encrypted. HIGH: both directions encrypted.
+                _encLevel = rdpHighEncryption ? StandardSecurity.LevelHigh : StandardSecurity.LevelLow;
                 _serverRsaKey = StandardSecurity.ServerRsaKey.Generate();
                 _serverRandom = RandomNumberGenerator.GetBytes(32);
                 serverCert = StandardSecurity.BuildProprietaryCertificate(_serverRsaKey);
@@ -494,6 +496,22 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private byte[] SecOut(ReadOnlySpan<byte> payload, ushort flags)
     {
         if (!_rdpEncryption) return payload.ToArray();
+
+        if (_encLevel >= StandardSecurity.LevelClientCompatible)
+        {
+            // ENCRYPTION_LEVEL_HIGH: encrypt server→client too — [flags|SEC_ENCRYPT|SEC_SECURE_CHECKSUM]
+            // [flagsHi][MAC 8][RC4 ciphertext].
+            var body = payload.ToArray();
+            var mac = _sessionKeys!.EncryptSign(body, salted: true);
+            var enc = new byte[12 + body.Length];
+            BinaryPrimitives.WriteUInt16LittleEndian(enc,
+                (ushort)(flags | StandardSecurity.SecEncrypt | StandardSecurity.SecSecureChecksum));
+            mac.CopyTo(enc, 4);
+            body.CopyTo(enc, 12);
+            return enc;
+        }
+
+        // ENCRYPTION_LEVEL_LOW: server→client is unencrypted, but the basic 4-byte header is required.
         var outp = new byte[4 + payload.Length];
         BinaryPrimitives.WriteUInt16LittleEndian(outp, flags);   // flags; flagsHi (bytes 2-3) = 0
         payload.CopyTo(outp.AsSpan(4));
@@ -504,7 +522,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private async Task RunActivationAsync(ushort userChannelId, CancellationToken ct)
     {
         State = ConnectionState.Licensing;
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Licensing.BuildValidClient()), ct);
+        // The licensing PDU carries its own SEC_LICENSE_PKT header. At HIGH it must also be encrypted,
+        // so route its body through SecOut (which adds SEC_ENCRYPT + MAC); at LOW/none send it as-is.
+        var license = Licensing.BuildValidClient();
+        var licenseOut = _rdpEncryption && _encLevel >= StandardSecurity.LevelClientCompatible
+            ? SecOut(license.AsSpan(4), StandardSecurity.SecLicensePkt)
+            : license;
+        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, licenseOut), ct);
         log.LogInformation("Sent licensing: valid client (no license required).");
 
         State = ConnectionState.CapabilityExchange;

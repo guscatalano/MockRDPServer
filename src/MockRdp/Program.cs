@@ -222,10 +222,16 @@ if (encIdx >= 0 && encIdx + 1 < args.Length)
         _ => MockRdp.Rdp.StandardSecurity.Method128Bit,
     };
 
+// --enc-level <low|high>: Standard RDP Security level (default low). HIGH encrypts server→client too.
+bool highEnc = false;
+int lvlIdx = Array.IndexOf(args, "--enc-level");
+if (lvlIdx >= 0 && lvlIdx + 1 < args.Length)
+    highEnc = args[lvlIdx + 1].Equals("high", StringComparison.OrdinalIgnoreCase);
+
 using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
     rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"),
     dvcBridges: dvcBridges.Count > 0 ? dvcBridges : null,
-    plugins: pluginHost, preferredRdpEncryption: preferredEnc);
+    plugins: pluginHost, preferredRdpEncryption: preferredEnc, rdpHighEncryption: highEnc);
 listener.Start();
 
 using var cts = new CancellationTokenSource();
