@@ -46,6 +46,7 @@ internal sealed class TrayApp : IDisposable
     private readonly HashSet<string> _channels = new(DefaultChannels, StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _pluginPaths = new();   // server-side DVC plugin DLLs to load
     private ToolStripMenuItem _pluginStatus = null!;
+    private string _freeRdpPath = "";                     // remembered wfreerdp/xfreerdp path
     private readonly Redir _redir = new();
 
     private bool Running => _listener is not null;
@@ -98,6 +99,13 @@ internal sealed class TrayApp : IDisposable
         foreach (var preset in Presets)
             connect.DropDownItems.Add(new ToolStripMenuItem(preset.Label, null, (_, _) => Connect(preset)));
         _menu.Items.Add(connect);
+
+        // FreeRDP path: works where a managed mstsc is forced to the legacy RDP security layer and
+        // can't offer TLS — FreeRDP isn't bound by that policy and speaks TLS to the mock.
+        var free = new ToolStripMenuItem("Connect with FreeRDP");
+        foreach (var preset in Presets)
+            free.DropDownItems.Add(new ToolStripMenuItem(preset.Label, null, (_, _) => ConnectFreeRdp(preset)));
+        _menu.Items.Add(free);
 
         // Port — presets plus a custom entry.
         var portMenu = new ToolStripMenuItem("Port");
@@ -358,6 +366,65 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
+    private void ConnectFreeRdp(Preset p)
+    {
+        if (!Running) StartServer();
+        var exe = ResolveFreeRdp();
+        if (exe is null) return;
+
+        // /sec:tls forces the TLS security layer (mstsc-on-a-managed-box can't); /cert:ignore accepts
+        // the self-signed dev cert; NLA is off under /sec:tls.
+        var args = $"/v:127.0.0.1:{_port} /cert:ignore /sec:tls /w:{p.Width} /h:{p.Height}";
+        try
+        {
+            Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false });
+            Balloon($"Launched FreeRDP → 127.0.0.1:{_port} (TLS).");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Couldn't launch FreeRDP:\n" + ex.Message, "Mock RDP",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>Find FreeRDP: a remembered path, then PATH, then ask the user to locate it.</summary>
+    private string? ResolveFreeRdp()
+    {
+        if (!string.IsNullOrEmpty(_freeRdpPath) && File.Exists(_freeRdpPath)) return _freeRdpPath;
+
+        foreach (var name in new[] { "wfreerdp.exe", "wfreerdp3.exe", "xfreerdp.exe", "xfreerdp3.exe" })
+        {
+            var found = FindOnPath(name);
+            if (found is not null) { _freeRdpPath = found; Save(); return found; }
+        }
+
+        var ask = MessageBox.Show(
+            "FreeRDP (wfreerdp.exe) wasn't found on PATH. Locate it now?\n\n" +
+            "Get a portable Windows build from github.com/FreeRDP/FreeRDP/releases.",
+            "Mock RDP — FreeRDP", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (ask != DialogResult.Yes) return null;
+
+        using var dlg = new OpenFileDialog
+        {
+            Filter = "FreeRDP (wfreerdp*.exe;xfreerdp*.exe)|wfreerdp*.exe;xfreerdp*.exe|Executables (*.exe)|*.exe",
+            Title = "Locate FreeRDP (wfreerdp.exe)",
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return null;
+        _freeRdpPath = dlg.FileName;
+        Save();
+        return _freeRdpPath;
+    }
+
+    private static string? FindOnPath(string exe)
+    {
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+        {
+            try { var full = Path.Combine(dir.Trim(), exe); if (File.Exists(full)) return full; }
+            catch { /* bad PATH entry */ }
+        }
+        return null;
+    }
+
     private string Rdp(Preset p)
     {
         var sb = new StringBuilder();
@@ -494,6 +561,7 @@ internal sealed class TrayApp : IDisposable
             }
             if (k.GetValue("Plugins") is string plugins && plugins.Length > 0)
                 _pluginPaths.AddRange(plugins.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            if (k.GetValue("FreeRdpPath") is string frp) _freeRdpPath = frp;
             if (k.GetValue("Redir") is int r)
             {
                 _redir.Drives = (r & 1) != 0; _redir.Clipboard = (r & 2) != 0; _redir.Printers = (r & 4) != 0;
@@ -516,6 +584,7 @@ internal sealed class TrayApp : IDisposable
             k.SetValue("LogLevel", (int)_logLevel, RegistryValueKind.DWord);
             k.SetValue("Channels", string.Join(",", _channels), RegistryValueKind.String);
             k.SetValue("Plugins", string.Join(";", _pluginPaths), RegistryValueKind.String);
+            k.SetValue("FreeRdpPath", _freeRdpPath, RegistryValueKind.String);
             int r = (_redir.Drives ? 1 : 0) | (_redir.Clipboard ? 2 : 0) | (_redir.Printers ? 4 : 0)
                   | (_redir.SmartCards ? 8 : 0) | (_redir.ComPorts ? 16 : 0) | (_redir.Audio ? 32 : 0);
             k.SetValue("Redir", r, RegistryValueKind.DWord);
