@@ -23,9 +23,13 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false,
     bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null,
     Dictionary<string, string>? dvcBridges = null,
-    Rdp.DvcPluginHost? plugins = null)
+    Rdp.DvcPluginHost? plugins = null,
+    bool allowStandardRdpSecurity = true)
 {
     private bool _nlaRequested;
+    // The security layer selected in X.224 negotiation. Ssl = TLS (enhanced security); Rdp =
+    // Standard RDP Security (legacy, no TLS). Echoed back in the GCC/MCS Connect-Response.
+    private RdpNegProtocol _selectedProtocol = RdpNegProtocol.Ssl;
     // Server-side DVC plugins (loaded DLLs): channel name -> plugin; per-open, a pipe the plugin's
     // RunAsync loop reads/writes, mirroring a real WTSVirtualChannelRead/Write agent.
     private readonly Rdp.DvcPluginHost? _plugins = plugins;
@@ -202,15 +206,37 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // desktop boots straight in; otherwise it shows a logon screen (like UserAuthentication=0).
         _nlaRequested = cr.HasNegReq && (cr.RequestedProtocols & (RdpNegProtocol.Hybrid | RdpNegProtocol.HybridEx)) != 0;
 
-        // M1 policy: TLS only. Reject anything that does not offer PROTOCOL_SSL.
-        if (!cr.HasNegReq || (cr.RequestedProtocols & RdpNegProtocol.Ssl) == 0)
+        // Security-layer selection. Prefer TLS whenever the client offers it. A client that does
+        // not offer TLS (a policy-locked mstsc forced off SSL, or FreeRDP `/sec:rdp`) falls back to
+        // Standard RDP Security when allowed; otherwise it is rejected (TLS-only posture).
+        bool offersTls = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.Ssl) != 0;
+
+        if (!offersTls)
         {
-            log.LogWarning("Client did not offer TLS; sending negotiation failure (SSL_REQUIRED_BY_SERVER).");
-            await WriteAsync(Cotp.BuildConnectionConfirmFailure(RdpNegFailureCode.SslRequiredByServer), ct);
+            if (!allowStandardRdpSecurity)
+            {
+                log.LogWarning("Client did not offer TLS and Standard RDP Security is disabled; " +
+                    "sending negotiation failure (SSL_REQUIRED_BY_SERVER).");
+                await WriteAsync(Cotp.BuildConnectionConfirmFailure(RdpNegFailureCode.SslRequiredByServer), ct);
+                return;
+            }
+
+            // Standard RDP Security (PROTOCOL_RDP). b0: advertise Encryption None (done in the GCC
+            // Server Security block), so there is no Security Exchange and the session runs in the
+            // clear. A negReq client gets an RDP Negotiation Response selecting PROTOCOL_RDP; a
+            // legacy client that sent no negReq gets a bare Connection Confirm.
+            _selectedProtocol = RdpNegProtocol.Rdp;
+            await WriteAsync(cr.HasNegReq
+                ? Cotp.BuildConnectionConfirm(RdpNegProtocol.Rdp, negRspFlags: 0x01)
+                : Cotp.BuildConnectionConfirmPlain(), ct);
+            log.LogInformation("Sent Connection Confirm selecting PROTOCOL_RDP (Standard RDP Security, " +
+                "encryption NONE); no TLS handshake.");
+            await RunMcsAsync(ct);
             return;
         }
 
         // EXTENDED_CLIENT_DATA_SUPPORTED (0x01): required by mstsc/mstscax to advance past TLS.
+        _selectedProtocol = RdpNegProtocol.Ssl;
         await WriteAsync(Cotp.BuildConnectionConfirm(RdpNegProtocol.Ssl, negRspFlags: 0x01), ct);
         log.LogInformation("Sent Connection Confirm selecting PROTOCOL_SSL; starting TLS handshake.");
 
@@ -260,7 +286,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested ({Names}).",
             channelCount, string.Join(", ", channels));
 
-        await WriteAsync(McsPdu.BuildConnectResponse(channelCount, (uint)RdpNegProtocol.Ssl), ct);
+        await WriteAsync(McsPdu.BuildConnectResponse(channelCount, (uint)_selectedProtocol), ct);
         log.LogInformation("Sent MCS Connect-Response (I/O=1003, VCs=1004..{Last}, user={User}).",
             Gcc.FirstVirtualChannelId + channelCount - 1, userChannelId);
 

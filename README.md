@@ -55,7 +55,13 @@ text over the `cliprdr` channel. Verified against **FreeRDP** and against **msts
 the ActiveX control that is `mstsc.exe`'s own engine — so the mock is mstsc-grade. See
 `tools/RdpAxClient/` for the mstscax-based test client.
 
-Security: **TLS-only** for now (advertises `PROTOCOL_SSL`); NLA/CredSSP deferred.
+Security layers: **TLS** (`PROTOCOL_SSL`, the default and preferred path) plus
+**Standard RDP Security** (`PROTOCOL_RDP`) for clients that can't or won't offer TLS —
+a policy-locked `mstsc` forced off SSL, or FreeRDP with `/sec:rdp`. Standard RDP Security
+currently runs at encryption level **NONE** (no Security Exchange; the session is in the
+clear); RC4 40/128-bit and FIPS/3DES are staged next. NLA/CredSSP (`PROTOCOL_HYBRID`)
+is still deferred. To enforce TLS only, construct the listener with
+`allowStandardRdpSecurity: false`.
 
 ## How it fits together
 

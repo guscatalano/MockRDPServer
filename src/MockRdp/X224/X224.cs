@@ -105,6 +105,19 @@ public static class Cotp
         return Tpkt.Wrap(w.AsSpan());
     }
 
+    /// <summary>A bare X.224 Connection Confirm carrying no RDP Negotiation Response — the reply to
+    /// a legacy client that sent no Negotiation Request (Standard RDP Security, no enhanced security).</summary>
+    public static byte[] BuildConnectionConfirmPlain()
+    {
+        var w = new ByteWriter();
+        w.WriteUInt8(6);                    // LI: 6 fixed bytes follow, no neg structure
+        w.WriteUInt8(TpduConnectionConfirm);
+        w.WriteUInt16BE(0);                 // dst-ref
+        w.WriteUInt16BE(0);                 // src-ref
+        w.WriteUInt8(0);                    // class option
+        return Tpkt.Wrap(w.AsSpan());
+    }
+
     /// <summary>Builds a TPKT-framed CC TPDU carrying an RDP Negotiation Failure.</summary>
     public static byte[] BuildConnectionConfirmFailure(RdpNegFailureCode failureCode)
     {

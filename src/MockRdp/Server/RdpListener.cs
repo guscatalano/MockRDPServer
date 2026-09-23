@@ -24,6 +24,7 @@ public sealed class RdpListener : IDisposable
     private readonly bool _logon;
     private readonly bool _desktopDirect;
     private readonly Rdp.DvcPluginHost? _plugins;
+    private readonly bool _allowStandardRdpSecurity;
 
     public RdpListener(IPAddress address, int port, X509Certificate2 cert, ILoggerFactory loggerFactory,
         string[]? dvcChannels = null, string[]? rdpdrReads = null,
@@ -31,8 +32,10 @@ public sealed class RdpListener : IDisposable
         string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false,
         bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null,
         Dictionary<string, string>? dvcBridges = null,
-        Rdp.DvcPluginHost? plugins = null)
+        Rdp.DvcPluginHost? plugins = null,
+        bool allowStandardRdpSecurity = true)
     {
+        _allowStandardRdpSecurity = allowStandardRdpSecurity;
         _vfsRoot = vfsRoot;
         _dvcBridges = dvcBridges;
         _plugins = plugins;
@@ -86,7 +89,8 @@ public sealed class RdpListener : IDisposable
             using (client)
             {
                 var conn = new RdpConnection(client, _cert, log, _dvcChannels, _rdpdrReads, _dvcBehaviors,
-                    _rdpdrLists, _rdpdrWrites, _desktop, _logon, _desktopDirect, _vfsRoot, _dvcBridges, _plugins);
+                    _rdpdrLists, _rdpdrWrites, _desktop, _logon, _desktopDirect, _vfsRoot, _dvcBridges, _plugins,
+                    _allowStandardRdpSecurity);
                 await conn.RunAsync(ct);
             }
         }

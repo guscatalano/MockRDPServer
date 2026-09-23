@@ -255,14 +255,17 @@ public static class McsClient
         return (U16(pdu, 22), U16(pdu, 24), U16(pdu, 30), U16(pdu, 32), U16(pdu, 34), U16(pdu, 40));
     }
 
-    /// <summary>Drives a client through negotiation, TLS, MCS connect and channel join; returns the user channel.</summary>
+    /// <summary>Drives a client through negotiation, TLS, MCS connect and channel join; returns the user channel.
+    /// With <paramref name="useTls"/> = false, negotiates Standard RDP Security (PROTOCOL_RDP) and runs in the
+    /// clear instead — the b0 path exercised by FreeRDP `/sec:rdp`.</summary>
     public static async Task<ushort> NegotiateThroughChannelJoinAsync(
-        RdpTestClient client, System.Net.IPEndPoint endpoint, string[] channels, CancellationToken ct)
+        RdpTestClient client, System.Net.IPEndPoint endpoint, string[] channels, CancellationToken ct,
+        bool useTls = true)
     {
         await client.ConnectAsync(endpoint, ct);
-        await client.SendConnectionRequestAsync(RdpNegProtocol.Ssl, ct: ct);
+        await client.SendConnectionRequestAsync(useTls ? RdpNegProtocol.Ssl : RdpNegProtocol.Rdp, ct: ct);
         await client.ReadConnectionConfirmAsync(ct);
-        await client.UpgradeToTlsAsync(ct: ct);
+        if (useTls) await client.UpgradeToTlsAsync(ct: ct);
 
         await client.WriteRawAsync(BuildConnectInitial(channels), ct);
         var (io, ids) = ParseConnectResponseNetwork(await client.ReadTpktPayloadAsync(ct));
