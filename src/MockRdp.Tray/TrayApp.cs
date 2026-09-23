@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Net;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using MockRdp.Server;
 using MockRdp.Transport;
@@ -40,6 +41,7 @@ internal sealed class TrayApp : IDisposable
     private bool _bindAny;                 // false = 127.0.0.1 only; true = 0.0.0.0 (LAN)
     private bool _bootToDesktop;           // skip the fake logon screen
     private bool _autoConnect;             // launch mstsc automatically when the server starts
+    private LogLevel _logLevel = LogLevel.Information;
     private readonly HashSet<string> _channels = new(DefaultChannels, StringComparer.OrdinalIgnoreCase);
     private readonly Redir _redir = new();
 
@@ -69,6 +71,7 @@ internal sealed class TrayApp : IDisposable
     public TrayApp()
     {
         LoadSettings();
+        _activityLog.MinLevel = _logLevel;
         _icon = new NotifyIcon { Icon = Branding.MakeIcon(16), Visible = true };
         BuildMenu();
         _icon.ContextMenuStrip = _menu;
@@ -152,6 +155,17 @@ internal sealed class TrayApp : IDisposable
         AddToggle("Start Mock RDP at logon", IsRunAtLogon, SetRunAtLogon,
             "Add/remove this tray app from the Windows startup (Run) key.");
 
+        // Log level — how much the Activity log captures. Lowering it surfaces Debug/Trace the
+        // server emits; radio-style so exactly one is ticked.
+        var logLevel = new ToolStripMenuItem("Log level");
+        foreach (var lvl in new[] { LogLevel.Trace, LogLevel.Debug, LogLevel.Information, LogLevel.Warning, LogLevel.Error })
+        {
+            var item = new ToolStripMenuItem(lvl.ToString()) { Checked = lvl == _logLevel, Tag = lvl };
+            item.Click += (_, _) => SetLogLevel((LogLevel)item.Tag);
+            logLevel.DropDownItems.Add(item);
+        }
+        _menu.Items.Add(logLevel);
+
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Activity log…", null, (_, _) => ShowLog()));
         _menu.Items.Add(new ToolStripMenuItem("Browse server files…", null, (_, _) => ShowFiles()));
@@ -182,6 +196,17 @@ internal sealed class TrayApp : IDisposable
         RestartServer();
         UpdateStatus();
         Balloon($"Port set to {_port}.");
+    }
+
+    private void SetLogLevel(LogLevel level)
+    {
+        _logLevel = level;
+        _activityLog.MinLevel = level;
+        Save();
+        foreach (var top in _menu.Items)
+            if (top is ToolStripMenuItem { Text: "Log level" } lm)
+                foreach (var d in lm.DropDownItems)
+                    if (d is ToolStripMenuItem { Tag: LogLevel tl } li) li.Checked = tl == level;
     }
 
     private static int? PromptPort(int current)
@@ -417,6 +442,7 @@ internal sealed class TrayApp : IDisposable
             _bindAny = (k.GetValue("BindAny") as int?) == 1;
             _bootToDesktop = (k.GetValue("BootToDesktop") as int?) == 1;
             _autoConnect = (k.GetValue("AutoConnect") as int?) == 1;
+            if (k.GetValue("LogLevel") is int ll && Enum.IsDefined((LogLevel)ll)) _logLevel = (LogLevel)ll;
             if (k.GetValue("Channels") is string csv && csv.Length > 0)
             {
                 _channels.Clear();
@@ -442,6 +468,7 @@ internal sealed class TrayApp : IDisposable
             k.SetValue("BindAny", _bindAny ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("BootToDesktop", _bootToDesktop ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("AutoConnect", _autoConnect ? 1 : 0, RegistryValueKind.DWord);
+            k.SetValue("LogLevel", (int)_logLevel, RegistryValueKind.DWord);
             k.SetValue("Channels", string.Join(",", _channels), RegistryValueKind.String);
             int r = (_redir.Drives ? 1 : 0) | (_redir.Clipboard ? 2 : 0) | (_redir.Printers ? 4 : 0)
                   | (_redir.SmartCards ? 8 : 0) | (_redir.ComPorts ? 16 : 0) | (_redir.Audio ? 32 : 0);

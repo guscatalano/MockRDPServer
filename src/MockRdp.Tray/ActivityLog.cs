@@ -15,6 +15,10 @@ internal sealed class ActivityLog : ILoggerFactory
     private readonly object _gate = new();
     private readonly Queue<string> _buffer = new();
 
+    /// <summary>Minimum level to capture. Set from the tray's Log level menu; read from the server's
+    /// background threads (an int-sized field, read atomically).</summary>
+    public LogLevel MinLevel { get; set; } = LogLevel.Information;
+
     /// <summary>Raised (possibly off the UI thread) for each formatted line.</summary>
     public event Action<string>? LineWritten;
 
@@ -46,7 +50,7 @@ internal sealed class ActivityLog : ILoggerFactory
     private sealed class SinkLogger(ActivityLog sink, string category) : ILogger
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-        public bool IsEnabled(LogLevel level) => level >= LogLevel.Information;
+        public bool IsEnabled(LogLevel level) => level != LogLevel.None && level >= sink.MinLevel;
 
         public void Log<TState>(LogLevel level, EventId id, TState state, Exception? ex,
             Func<TState, Exception?, string> formatter)
