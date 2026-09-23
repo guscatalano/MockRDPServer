@@ -392,6 +392,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             ConnectionStats = BuildConnectionStats,
             DvcTraffic = () => _dvcLog.ToArray(),
             DvcChannels = BuildChannels,
+            DvcOpenNames = () => _dvcOpen.Values.Distinct().ToArray(),   // real DVCs the chaos window can fail
             ClipboardAvailable = () => _cliprdrChannelId != 0,
         };
         log.LogInformation("Fake desktop booting to {Boot} (NLA requested: {Nla}).",

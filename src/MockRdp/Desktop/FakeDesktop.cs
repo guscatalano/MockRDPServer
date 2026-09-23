@@ -79,6 +79,11 @@ public sealed class FakeDesktop : IDisposable
     public sealed class ChaosState { public bool Enabled; public int Percent = 25; }
     public ChaosState Chaos { get; } = new();
 
+    /// <summary>The actual open dynamic virtual channels (raw names) — what the DVC Chaos window can
+    /// force-fail. Distinct from <see cref="DvcChannels"/>, which also lists input/graphics/SVCs for
+    /// the Channel Monitor.</summary>
+    public Func<IReadOnlyList<string>>? DvcOpenNames;
+
     /// <summary>Channels the user clicked "Fail" on in the DVC Chaos window — the host tears them down.
     /// Read-and-clear.</summary>
     private readonly List<string> _chaosKills = new();
@@ -928,7 +933,7 @@ public sealed class FakeDesktop : IDisposable
         if (InRect(x, y, ChaosPlus(w))) { Chaos.Percent = Math.Min(100, Chaos.Percent + 10); return true; }
 
         // Force-fail a specific open channel: hit-test the "Fail" button on each listed row.
-        var channels = DvcChannels?.Invoke() ?? [];
+        var channels = DvcOpenNames?.Invoke() ?? [];
         for (int i = 0; i < channels.Count && i < 5; i++)
             if (InRect(x, y, ChaosFailRect(w, i)))
             {
@@ -962,7 +967,7 @@ public sealed class FakeDesktop : IDisposable
 
         // Force-fail a specific channel: list the open DVCs, each with a red Fail button.
         Text(ctx, _small, "Force-fail a channel:", w.X + 14, w.Y + TitleH + 130, Color.ParseHex("505050"));
-        var channels = DvcChannels?.Invoke() ?? [];
+        var channels = DvcOpenNames?.Invoke() ?? [];
         if (channels.Count == 0)
             Text(ctx, _small, "(no DVCs open yet)", w.X + 20, w.Y + TitleH + 152, Color.ParseHex("909090"));
         for (int i = 0; i < channels.Count && i < 5; i++)
