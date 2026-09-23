@@ -15,28 +15,43 @@ namespace MockRdp.Tests.Harness;
 public static class McsClient
 {
     /// <summary>Builds a TPKT-framed MCS Connect-Initial requesting the given virtual channels.</summary>
-    public static byte[] BuildConnectInitial(params string[] channels)
+    public static byte[] BuildConnectInitial(params string[] channels) =>
+        BuildConnectInitial(0, channels);
+
+    /// <summary>Builds an MCS Connect-Initial. When <paramref name="encryptionMethods"/> is non-zero,
+    /// a CS_SECURITY block advertises those RC4 methods so the server turns on Standard RDP Security.</summary>
+    public static byte[] BuildConnectInitial(uint encryptionMethods, params string[] channels)
     {
+        var blocks = new ByteWriter();
+
         // Client Network Data (CS_NET): channelCount + 12-byte CHANNEL_DEF entries.
-        var net = new ByteWriter();
-        net.WriteUInt16LE(0xC003);
-        net.WriteUInt16LE((ushort)(8 + channels.Length * 12));
-        net.WriteUInt32LE((uint)channels.Length);
+        blocks.WriteUInt16LE(0xC003);
+        blocks.WriteUInt16LE((ushort)(8 + channels.Length * 12));
+        blocks.WriteUInt32LE((uint)channels.Length);
         Span<byte> field = stackalloc byte[8];
         foreach (var name in channels)
         {
             field.Clear();
             Encoding.ASCII.GetBytes(name).AsSpan(0, Math.Min(name.Length, 7)).CopyTo(field);
-            net.WriteBytes(field);
-            net.WriteUInt32LE(0); // options
+            blocks.WriteBytes(field);
+            blocks.WriteUInt32LE(0); // options
+        }
+
+        // Client Security Data (CS_SECURITY): advertise supported encryption methods.
+        if (encryptionMethods != 0)
+        {
+            blocks.WriteUInt16LE(0xC002);
+            blocks.WriteUInt16LE(12);
+            blocks.WriteUInt32LE(encryptionMethods);
+            blocks.WriteUInt32LE(0); // extEncryptionMethods
         }
 
         // GCC user data: ConnectData prefix + client H.221 key "Duca" + PER length + blocks.
         var gcc = new ByteWriter();
         gcc.WriteBytes([0x00, 0x05, 0x00, 0x14, 0x7C, 0x00, 0x01]);
         gcc.WriteBytes("Duca"u8);
-        Asn1.WritePerLength(gcc, net.Length);
-        gcc.WriteBytes(net.AsSpan());
+        Asn1.WritePerLength(gcc, blocks.Length);
+        gcc.WriteBytes(blocks.AsSpan());
 
         // MCS Connect-Initial (BER, [APPLICATION 101]).
         byte[] dp = [0x02, 0x01, 0x22, 0x02, 0x01, 0x02, 0x02, 0x01, 0x00, 0x02, 0x01, 0x01,
@@ -141,15 +156,57 @@ public static class McsClient
         var info = new ByteWriter();
         info.WriteUInt16LE(0x0040); // Security Header flags = SEC_INFO_PKT
         info.WriteUInt16LE(0x0000);
+        info.WriteBytes(BuildInfoPacketData());
+        return SendDataRequest(userId, Gcc.IoChannelId, info.AsSpan());
+    }
+
+    /// <summary>The Client Info PDU's InfoPacket (everything after the security header) — the part a
+    /// Standard-RDP-Security client encrypts. Empty (null) strings; the mock doesn't validate them.</summary>
+    public static byte[] BuildInfoPacketData()
+    {
+        var info = new ByteWriter();
         info.WriteUInt32LE(0);      // CodePage
         info.WriteUInt32LE(0);      // flags
         for (int i = 0; i < 5; i++) info.WriteUInt16LE(0); // cbDomain..cbWorkingDir
         for (int i = 0; i < 5; i++) info.WriteUInt16LE(0); // empty (null) strings
-        return SendDataRequest(userId, Gcc.IoChannelId, info.AsSpan());
+        return info.ToArray();
+    }
+
+    /// <summary>Finds the SC_SECURITY block in a Connect-Response and returns the server random and
+    /// the proprietary server certificate.</summary>
+    public static (byte[] ServerRandom, byte[] Cert) ParseServerSecurity(ReadOnlySpan<byte> tpdu)
+    {
+        var mcs = Cotp.StripDataTpdu(tpdu);
+        int mcdn = IndexOf(mcs, "McDn"u8);
+        if (mcdn < 0) throw new FormatException("Server GCC key 'McDn' not found.");
+        int pos = mcdn + 4;
+        _ = Asn1.ReadPerLength(mcs, ref pos);
+
+        while (pos + 4 <= mcs.Length)
+        {
+            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(mcs.Slice(pos, 2));
+            ushort len = BinaryPrimitives.ReadUInt16LittleEndian(mcs.Slice(pos + 2, 2));
+            if (len < 4) break;
+            if (type == 0x0C02)
+            {
+                int srLen = (int)BinaryPrimitives.ReadUInt32LittleEndian(mcs.Slice(pos + 12, 4));
+                int certLen = (int)BinaryPrimitives.ReadUInt32LittleEndian(mcs.Slice(pos + 16, 4));
+                var sr = mcs.Slice(pos + 20, srLen).ToArray();
+                var cert = mcs.Slice(pos + 20 + srLen, certLen).ToArray();
+                return (sr, cert);
+            }
+            pos += len;
+        }
+        throw new FormatException("SC_SECURITY block not found in Connect-Response.");
     }
 
     /// <summary>Minimal Confirm Active PDU (no capability sets — the mock does not parse them).</summary>
-    public static byte[] BuildConfirmActive(ushort userId, uint shareId)
+    public static byte[] BuildConfirmActive(ushort userId, uint shareId) =>
+        SendDataRequest(userId, Gcc.IoChannelId, BuildConfirmActivePdu(userId, shareId));
+
+    /// <summary>The raw Confirm Active ShareControl PDU (before Send Data wrapping) — the payload a
+    /// Standard-RDP-Security client encrypts.</summary>
+    public static byte[] BuildConfirmActivePdu(ushort userId, uint shareId)
     {
         ReadOnlySpan<byte> source = "RDP\0"u8;
         var body = new ByteWriter();
@@ -160,20 +217,22 @@ public static class McsClient
         body.WriteBytes(source);
         body.WriteUInt16LE(0);                   // numberCapabilities
         body.WriteUInt16LE(0);                   // pad
-        var pdu = ShareControl.Wrap(ShareControl.ConfirmActive, userId, body.AsSpan());
-        return SendDataRequest(userId, Gcc.IoChannelId, pdu);
+        return ShareControl.Wrap(ShareControl.ConfirmActive, userId, body.AsSpan());
     }
 
     /// <summary>Font List Data PDU — the finalization trigger that makes the server respond.</summary>
-    public static byte[] BuildFontList(ushort userId)
+    public static byte[] BuildFontList(ushort userId) =>
+        SendDataRequest(userId, Gcc.IoChannelId, BuildFontListPdu());
+
+    /// <summary>The raw Font List Data PDU (before Send Data wrapping).</summary>
+    public static byte[] BuildFontListPdu()
     {
         var d = new ByteWriter();
         d.WriteUInt16LE(0);       // numberFonts
         d.WriteUInt16LE(0);       // totalNumFonts
         d.WriteUInt16LE(0x0003);  // listFlags = FIRST | LAST
         d.WriteUInt16LE(50);      // entrySize
-        var pdu = Finalization.BuildDataPdu(Finalization.Pdu2FontList, d.AsSpan());
-        return SendDataRequest(userId, Gcc.IoChannelId, pdu);
+        return Finalization.BuildDataPdu(Finalization.Pdu2FontList, d.AsSpan());
     }
 
     /// <summary>Builds a fast-path input frame carrying a single mouse event.</summary>

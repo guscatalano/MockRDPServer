@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Security.Cryptography;
 
@@ -277,6 +278,57 @@ public static class StandardSecurity
         var outp = new byte[64];
         Array.Copy(le, outp, Math.Min(le.Length, 64));  // little-endian, zero-padded to 64
         return outp;
+    }
+
+    // ---- Client-side helpers (symmetry; used by tests and any client-side crypto) ---------------
+
+    /// <summary>Derives the MAC key and both directional RC4 keys from the two randoms (MS-RDPBCGR
+    /// 5.3.5.1). The server decrypts client→server with <c>clientEncryptKey</c>; a client encrypts with
+    /// it. RC4 keys are already salted/truncated for 40/56-bit; the MAC key is left full-length.</summary>
+    public static (byte[] MacKey, byte[] ClientEncryptKey, byte[] ClientDecryptKey) DeriveKeys(
+        byte[] clientRandom, byte[] serverRandom, uint method)
+    {
+        var pre = new byte[48];
+        Array.Copy(clientRandom, 0, pre, 0, 24);
+        Array.Copy(serverRandom, 0, pre, 24, 24);
+
+        var master = new byte[48];
+        SaltedHash(pre, "A"u8, clientRandom, serverRandom, master.AsSpan(0, 16));
+        SaltedHash(pre, "BB"u8, clientRandom, serverRandom, master.AsSpan(16, 16));
+        SaltedHash(pre, "CCC"u8, clientRandom, serverRandom, master.AsSpan(32, 16));
+
+        var blob = new byte[48];
+        SaltedHash(master, "X"u8, clientRandom, serverRandom, blob.AsSpan(0, 16));
+        SaltedHash(master, "YY"u8, clientRandom, serverRandom, blob.AsSpan(16, 16));
+        SaltedHash(master, "ZZZ"u8, clientRandom, serverRandom, blob.AsSpan(32, 16));
+
+        var mac = blob[0..16];
+        var cEnc = FinalHash(blob.AsSpan(32, 16), clientRandom, serverRandom); Salt(cEnc, method);
+        var cDec = FinalHash(blob.AsSpan(16, 16), clientRandom, serverRandom); Salt(cDec, method);
+        return (mac, cEnc, cDec);
+    }
+
+    /// <summary>Extracts the RSA public key (little-endian modulus + exponent) from a Proprietary Server
+    /// Certificate, so a client can encrypt its client random for the Security Exchange PDU.</summary>
+    public static (byte[] ModulusLE, byte[] ExponentLE) ParsePublicKeyFromProprietaryCert(byte[] cert)
+    {
+        // dwVersion(4) dwSigAlg(4) dwKeyAlg(4) wPubType(2) wPubLen(2), then the RSA_PUBLIC_KEY blob:
+        // magic(4) keylen(4) bitlen(4) datalen(4) pubExp(4) modulus(keylen = modBytes+8 pad).
+        const int pub = 16;
+        uint keylen = BinaryPrimitives.ReadUInt32LittleEndian(cert.AsSpan(pub + 4, 4));
+        var exponent = cert.AsSpan(pub + 16, 4).ToArray();
+        var modulus = cert.AsSpan(pub + 20, (int)keylen - 8).ToArray();   // drop the 8-byte pad
+        return (modulus, exponent);
+    }
+
+    /// <summary>Raw RSA (no padding) over little-endian integers — how RDP encrypts the client random
+    /// with the server's public key (MS-RDPBCGR 5.3.4.1). Returns the little-endian ciphertext.</summary>
+    public static byte[] RsaRawEncrypt(byte[] modulusLE, byte[] exponentLE, byte[] dataLE)
+    {
+        var n = new BigInteger(modulusLE, isUnsigned: true, isBigEndian: false);
+        var e = new BigInteger(exponentLE, isUnsigned: true, isBigEndian: false);
+        var m = new BigInteger(dataLE, isUnsigned: true, isBigEndian: false);
+        return BigInteger.ModPow(m, e, n).ToByteArray(isUnsigned: true, isBigEndian: false);
     }
 
     // ---- MAC + key-schedule primitives ----------------------------------------------------------
