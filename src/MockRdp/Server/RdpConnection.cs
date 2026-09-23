@@ -623,6 +623,18 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("Rendered fake desktop.");
     }
 
+    /// <summary>The negotiated security, for the Connection Info window: the X.224 protocol plus, for
+    /// Standard RDP Security, the RC4 method and encryption level.</summary>
+    private string SecurityDescription() => _selectedProtocol switch
+    {
+        RdpNegProtocol.RdsTls => "RDSTLS (TLS + RDSTLS auth)",
+        RdpNegProtocol.Rdp when _rdpEncryption =>
+            $"Standard RDP Security · {StandardSecurity.MethodName(_encMethod)} · " +
+            (_encLevel >= StandardSecurity.LevelClientCompatible ? "High (both ways)" : "Low (client→server)"),
+        RdpNegProtocol.Rdp => "Standard RDP Security · no encryption",
+        _ => _nlaRequested ? "TLS + NLA requested" : "TLS (no NLA)",
+    };
+
     /// <summary>Live rows for the desktop's "Connection Info" window: what a real RDP session would
     /// expose about itself — state, security, the joined static channels, the open dynamic virtual
     /// channels, and the client's redirected drives.</summary>
@@ -645,7 +657,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             ("State", State.ToString()),
             ("Client address", _clientEndpoint),
             ("Client user", string.IsNullOrEmpty(who) ? "(none)" : who),
-            ("Security", _nlaRequested ? "TLS + NLA requested" : "TLS (no NLA)"),
+            ("Security", SecurityDescription()),
             ("Resolution", $"{_width} × {_height} @ {Capabilities.BitsPerPixel}bpp"),
             ("Uptime", $"{(int)up.TotalMinutes:00}:{up.Seconds:00}"),
             ("Share id", $"0x{Capabilities.ShareId:X8}"),
