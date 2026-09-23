@@ -77,15 +77,15 @@ jobs:
 
       # Self-contained single-file exe so RDPeek's integration tests can download and run
       # it as a real DVC-capable RDP target with no .NET runtime on the box.
-      - name: Publish MockRdp (console)
+      - name: Publish MockRdpCli (console)
         run: >
           dotnet publish src/MockRdp -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -o publish
 
-      # The tray app — the no-cmdline entry point. Published to the same folder so a bare
-      # MockRdp.exe (no args) hands off to MockRdpTray.exe sitting next to it.
-      - name: Publish MockRdp tray
+      # The tray app — the run-this entry point. Published to the same folder so a bare
+      # MockRdpCli.exe (no args) hands off to MockRdpTray.exe sitting next to it.
+      - name: Publish MockRdpTray (GUI)
         run: >
           dotnet publish src/MockRdp.Tray -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
@@ -96,6 +96,6 @@ jobs:
         with:
           name: mockrdp-win-x64
           path: |
-            publish/MockRdp.exe
             publish/MockRdpTray.exe
+            publish/MockRdpCli.exe
           if-no-files-found: error

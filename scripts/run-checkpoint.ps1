@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-$exe = Join-Path $repo "src\MockRdp\bin\Debug\net10.0\MockRdp.exe"
+$exe = Join-Path $repo "src\MockRdp\bin\Debug\net10.0\MockRdpCli.exe"
 
 Write-Host "Building MockRdp..."
 & dotnet build (Join-Path $repo "src\MockRdp\MockRdp.csproj") -c Debug --nologo -v quiet

@@ -5,6 +5,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- The console/scriptable server. The GUI tray (MockRdp.Tray) is the run-this one. -->
+    <AssemblyName>MockRdpCli</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

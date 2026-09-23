@@ -12,7 +12,7 @@
 
 .NOTES
   The cert-pin + credential-less .rdp is why this "just connects" where a raw
-  MockRdp.exe launch makes mstsc prompt for trust and credentials.
+  MockRdpCli.exe launch makes mstsc prompt for trust and credentials.
 #>
 [CmdletBinding()]
 param(
@@ -28,11 +28,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 
-Write-Host "Building MockRdp ($Configuration)..." -ForegroundColor Cyan
+Write-Host "Building MockRdpCli ($Configuration)..." -ForegroundColor Cyan
 dotnet build (Join-Path $repo 'src\MockRdp') -c $Configuration --nologo | Out-Null
-$exe = (Get-ChildItem (Join-Path $repo 'src\MockRdp\bin') -Recurse -Filter 'MockRdp.exe' |
+$exe = (Get-ChildItem (Join-Path $repo 'src\MockRdp\bin') -Recurse -Filter 'MockRdpCli.exe' |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-if (-not $exe) { throw "MockRdp.exe not found after build." }
+if (-not $exe) { throw "MockRdpCli.exe not found after build." }
 
 $cer  = Join-Path $env:TEMP "mockrdp-$Port.cer"
 $log  = Join-Path $env:TEMP "mockrdp-$Port.log"
@@ -95,4 +95,4 @@ public static void A(){EnumWindows((h,_)=>{if(IsWindowVisible(h)&&Cl(h)=="#32770
 
 Start-Process mstsc.exe -ArgumentList $rdp | Out-Null
 Write-Host "Connected mstsc to 127.0.0.1:$Port  ·  Log: $log" -ForegroundColor Green
-Write-Host "Stop with:  Get-Process MockRdp,mstsc | Stop-Process -Force"
+Write-Host "Stop with:  Get-Process MockRdpCli,mstsc | Stop-Process -Force"

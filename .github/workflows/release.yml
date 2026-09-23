@@ -25,23 +25,23 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Publish self-contained mock server (console)
+      - name: Publish self-contained CLI (console)
         run: >
           dotnet publish src/MockRdp -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -o publish
 
-      # The tray app is the no-cmdline entry point (run it, everything's in the menu). Same folder,
-      # so a bare MockRdp.exe hands off to MockRdpTray.exe next to it.
-      - name: Publish self-contained tray
+      # The tray app is the run-this entry point (everything's in the menu). Same folder,
+      # so a bare MockRdpCli.exe hands off to MockRdpTray.exe next to it.
+      - name: Publish self-contained tray (GUI)
         run: >
           dotnet publish src/MockRdp.Tray -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -o publish
 
-      # Published as release assets so consumers (RDPeek) can fetch a stable URL:
-      #   https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdp.exe
-      #   https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdpTray.exe
+      # Published as release assets so consumers (RDPeek) can fetch stable URLs:
+      #   https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdpTray.exe   (run this)
+      #   https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdpCli.exe    (console/CI)
       - name: Create / update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,6 +49,6 @@ jobs:
         run: |
           $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
           gh release create $tag `
-            publish/MockRdp.exe `
             publish/MockRdpTray.exe `
+            publish/MockRdpCli.exe `
             --title $tag --generate-notes

@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$srv = Join-Path $repo "src\MockRdp\bin\Debug\net10.0\MockRdp.exe"
+$srv = Join-Path $repo "src\MockRdp\bin\Debug\net10.0\MockRdpCli.exe"
 $cli = Join-Path $repo "tools\RdpAxClient\bin\Debug\net10.0-windows\RdpAxClient.exe"
 $srvLog = Join-Path $env:TEMP "mockrdp-mstscax.log"
 
