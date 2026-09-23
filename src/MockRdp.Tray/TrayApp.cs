@@ -43,6 +43,9 @@ internal sealed class TrayApp : IDisposable
     private bool _bootToDesktop;           // skip the fake logon screen
     private bool _autoConnect;             // launch mstsc automatically when the server starts
     private LogLevel _logLevel = LogLevel.Information;
+    private uint _encMethod = MockRdp.Rdp.StandardSecurity.Method128Bit;  // preferred RC4 method for PROTOCOL_RDP
+    private bool _encHigh;                  // ENCRYPTION_LEVEL_HIGH (encrypt both directions)
+    private bool _nla;                      // NLA / CredSSP (validated by SSPI against this host)
     private readonly HashSet<string> _channels = new(DefaultChannels, StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _pluginPaths = new();   // server-side DVC plugin DLLs to load
     private ToolStripMenuItem _pluginStatus = null!;
@@ -165,8 +168,7 @@ internal sealed class TrayApp : IDisposable
         _menu.Items.Add(redir);
 
         AddToggle("Start at the desktop (skip logon)", () => _bootToDesktop, v => { _bootToDesktop = v; Save(); RestartServer(); },
-            "Off: mstsc lands on the mock logon screen. On: it boots straight to the desktop.\n"
-            + "(The mock is TLS-only and cannot do NLA.)");
+            "Off: mstsc lands on the mock logon screen. On: it boots straight to the desktop.");
 
         AddToggle("Auto-connect when the server starts", () => _autoConnect, v => { _autoConnect = v; Save(); },
             "Launch Remote Desktop automatically whenever the server starts.");
@@ -185,6 +187,32 @@ internal sealed class TrayApp : IDisposable
         }
         _menu.Items.Add(logLevel);
 
+        // Security — the RDP security layer offered to clients. TLS and RDSTLS are always on; these
+        // control Standard RDP Security (PROTOCOL_RDP) and NLA (PROTOCOL_HYBRID).
+        var security = new ToolStripMenuItem("Security");
+        var encMenu = new ToolStripMenuItem("RDP encryption (PROTOCOL_RDP)");
+        foreach (var (label, method) in new (string, uint)[]
+                 {
+                     ("128-bit RC4", MockRdp.Rdp.StandardSecurity.Method128Bit),
+                     ("56-bit RC4", MockRdp.Rdp.StandardSecurity.Method56Bit),
+                     ("40-bit RC4", MockRdp.Rdp.StandardSecurity.Method40Bit),
+                     ("None (clear)", 0u),
+                 })
+        {
+            var item = new ToolStripMenuItem(label) { Checked = method == _encMethod, Tag = method };
+            item.Click += (_, _) => SetEncMethod((uint)item.Tag);
+            encMenu.DropDownItems.Add(item);
+        }
+        security.DropDownItems.Add(encMenu);
+        AddToggleTo(security, "High encryption (encrypt both directions)", () => _encHigh,
+            v => { _encHigh = v; Save(); RestartServer(); },
+            "Standard RDP Security level. Off = Low (client→server only); On = High (both ways).");
+        AddToggleTo(security, "NLA / CredSSP (validated against this PC)", () => _nla,
+            v => { _nla = v; Save(); RestartServer(); },
+            "Accept PROTOCOL_HYBRID (NLA). Credentials are validated by Windows against THIS machine — "
+            + "use a local account. Off: a HYBRID request is downgraded to plain TLS.");
+        _menu.Items.Add(security);
+
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Activity log…", null, (_, _) => ShowLog()));
         _menu.Items.Add(new ToolStripMenuItem("Browse server files…", null, (_, _) => ShowFiles()));
@@ -194,12 +222,31 @@ internal sealed class TrayApp : IDisposable
         _menu.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => Exit()));
     }
 
-    private void AddToggle(string label, Func<bool> get, Action<bool> set, string? tip = null)
+    private void AddToggle(string label, Func<bool> get, Action<bool> set, string? tip = null) =>
+        AddToggleTo(null, label, get, set, tip);
+
+    /// <summary>Adds a checkable toggle to <paramref name="parent"/>'s dropdown, or to the root menu
+    /// when <paramref name="parent"/> is null.</summary>
+    private void AddToggleTo(ToolStripMenuItem? parent, string label, Func<bool> get, Action<bool> set, string? tip = null)
     {
         var item = new ToolStripMenuItem(label) { CheckOnClick = true, Checked = get() };
         if (tip is not null) item.ToolTipText = tip;
         item.CheckedChanged += (_, _) => set(item.Checked);
-        _menu.Items.Add(item);
+        (parent?.DropDownItems ?? _menu.Items).Add(item);
+    }
+
+    private void SetEncMethod(uint method)
+    {
+        if (method == _encMethod) return;
+        _encMethod = method;
+        Save();
+        foreach (ToolStripItem top in _menu.Items)
+            if (top is ToolStripMenuItem { Text: "Security" } sec)
+                foreach (ToolStripItem d in sec.DropDownItems)
+                    if (d is ToolStripMenuItem { Text: "RDP encryption (PROTOCOL_RDP)" } em)
+                        foreach (ToolStripItem mi in em.DropDownItems)
+                            if (mi is ToolStripMenuItem { Tag: uint tm } item) item.Checked = tm == method;
+        RestartServer();
     }
 
     private void SetPort(int port)
@@ -294,7 +341,8 @@ internal sealed class TrayApp : IDisposable
         _listener = new RdpListener(_bindAny ? IPAddress.Any : IPAddress.Loopback, _port, cert, _activityLog,
             dvcChannels: channels, rdpdrReads: null, dvcBehaviors: null,
             rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop,
-            vfsRoot: _sharedVfs, plugins: plugins);
+            vfsRoot: _sharedVfs, plugins: plugins,
+            preferredRdpEncryption: _encMethod, rdpHighEncryption: _encHigh, enableNla: _nla);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
         UpdateStatus();
@@ -553,6 +601,9 @@ internal sealed class TrayApp : IDisposable
             _bootToDesktop = (k.GetValue("BootToDesktop") as int?) == 1;
             _autoConnect = (k.GetValue("AutoConnect") as int?) == 1;
             if (k.GetValue("LogLevel") is int ll && Enum.IsDefined((LogLevel)ll)) _logLevel = (LogLevel)ll;
+            if (k.GetValue("EncMethod") is int em) _encMethod = (uint)em;
+            _encHigh = (k.GetValue("EncHigh") as int?) == 1;
+            _nla = (k.GetValue("Nla") as int?) == 1;
             if (k.GetValue("Channels") is string csv && csv.Length > 0)
             {
                 _channels.Clear();
@@ -582,6 +633,9 @@ internal sealed class TrayApp : IDisposable
             k.SetValue("BootToDesktop", _bootToDesktop ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("AutoConnect", _autoConnect ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("LogLevel", (int)_logLevel, RegistryValueKind.DWord);
+            k.SetValue("EncMethod", (int)_encMethod, RegistryValueKind.DWord);
+            k.SetValue("EncHigh", _encHigh ? 1 : 0, RegistryValueKind.DWord);
+            k.SetValue("Nla", _nla ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("Channels", string.Join(",", _channels), RegistryValueKind.String);
             k.SetValue("Plugins", string.Join(";", _pluginPaths), RegistryValueKind.String);
             k.SetValue("FreeRdpPath", _freeRdpPath, RegistryValueKind.String);
