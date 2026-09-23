@@ -19,24 +19,28 @@ public class EncryptedHandshakeTests
 {
     private static CancellationToken Timeout => new CancellationTokenSource(TimeSpan.FromSeconds(15)).Token;
 
-    [Fact]
-    public async Task StandardRdpSecurity_128Bit_CompletesEncryptedActivation()
+    // 128-bit is additionally verified against real FreeRDP; 40/56-bit are locked here for regression
+    // (server and client agree on the salted key schedule), the paths FreeRDP couldn't confirm.
+    [Theory]
+    [InlineData(StandardSecurity.Method128Bit)]
+    [InlineData(StandardSecurity.Method56Bit)]
+    [InlineData(StandardSecurity.Method40Bit)]
+    public async Task StandardRdpSecurity_CompletesEncryptedActivation(uint method)
     {
         using var server = new MockServerFixture(desktop: true);
         await using var client = new RdpTestClient();
         var ct = Timeout;
 
-        // Negotiate PROTOCOL_RDP offering 128-bit RC4 (no TLS on this path).
+        // Negotiate PROTOCOL_RDP offering just this RC4 method (no TLS on this path).
         await client.ConnectAsync(server.Endpoint, ct);
         await client.SendConnectionRequestAsync(RdpNegProtocol.Rdp, ct: ct);
         Assert.Equal(RdpNegProtocol.Rdp, (await client.ReadConnectionConfirmAsync(ct)).SelectedProtocol);
 
-        await client.WriteRawAsync(
-            McsClient.BuildConnectInitial(StandardSecurity.Method128Bit, "cliprdr", "drdynvc"), ct);
+        await client.WriteRawAsync(McsClient.BuildConnectInitial(method, "cliprdr", "drdynvc"), ct);
         var connectResp = await client.ReadTpktPayloadAsync(ct);
 
         // Derive keys from the server's cert + random (proves the server advertised them correctly).
-        var crypto = new RdpCryptoClient(connectResp, StandardSecurity.Method128Bit);
+        var crypto = new RdpCryptoClient(connectResp, method);
         var (io, ids) = McsClient.ParseConnectResponseNetwork(connectResp);
 
         await client.WriteRawAsync(McsClient.ErectDomainRequest(), ct);
