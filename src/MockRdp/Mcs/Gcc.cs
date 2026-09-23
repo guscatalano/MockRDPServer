@@ -103,12 +103,14 @@ public static class Gcc
     /// advertising the I/O channel plus <paramref name="channelCount"/> virtual channels
     /// (1004, 1005, …). This is the OCTET STRING placed in the MCS Connect-Response userData.
     /// </summary>
-    public static byte[] BuildConferenceCreateResponse(int channelCount, uint selectedProtocol)
+    public static byte[] BuildConferenceCreateResponse(int channelCount, uint selectedProtocol,
+        uint encryptionMethod = 0, uint encryptionLevel = 0,
+        byte[]? serverRandom = null, byte[]? serverCertificate = null)
     {
         var blocks = new ByteWriter();
         WriteServerCore(blocks, selectedProtocol);
         WriteServerNetwork(blocks, channelCount);
-        WriteServerSecurity(blocks);
+        WriteServerSecurity(blocks, encryptionMethod, encryptionLevel, serverRandom, serverCertificate);
 
         var ccr = new ByteWriter();
         ccr.WriteBytes(CcrHeader);
@@ -143,13 +145,54 @@ public static class Gcc
         if (pad) w.WriteUInt16LE(0);
     }
 
-    private static void WriteServerSecurity(ByteWriter w)
+    private static void WriteServerSecurity(ByteWriter w, uint encryptionMethod, uint encryptionLevel,
+        byte[]? serverRandom, byte[]? serverCertificate)
     {
-        // TLS ("enhanced security") is in effect, so RDP-level encryption is NONE.
+        if (encryptionMethod == 0 || serverRandom is null || serverCertificate is null)
+        {
+            // No RDP-level encryption (TLS enhanced security, or Standard RDP Security at level NONE).
+            w.WriteUInt16LE(ScSecurity);
+            w.WriteUInt16LE(12);
+            w.WriteUInt32LE(0); // encryptionMethod = 0
+            w.WriteUInt32LE(0); // encryptionLevel  = 0 (ENCRYPTION_LEVEL_NONE)
+            return;
+        }
+
+        // Standard RDP Security with encryption: advertise the chosen method/level, the 32-byte
+        // server random, and the proprietary server certificate (MS-RDPBCGR 2.2.1.4.3).
+        int len = 4 + 16 + serverRandom.Length + serverCertificate.Length;
         w.WriteUInt16LE(ScSecurity);
-        w.WriteUInt16LE(12);
-        w.WriteUInt32LE(0); // encryptionMethod = 0
-        w.WriteUInt32LE(0); // encryptionLevel  = 0 (ENCRYPTION_LEVEL_NONE)
+        w.WriteUInt16LE((ushort)len);
+        w.WriteUInt32LE(encryptionMethod);
+        w.WriteUInt32LE(encryptionLevel);
+        w.WriteUInt32LE((uint)serverRandom.Length);        // serverRandomLen
+        w.WriteUInt32LE((uint)serverCertificate.Length);   // serverCertLen
+        w.WriteBytes(serverRandom);
+        w.WriteBytes(serverCertificate);
+    }
+
+    // Client-to-server security data (TS_UD_CS_SEC, type 0xC002): the encryption methods the client
+    // supports. Bit flags: 0x01=40-bit, 0x02=128-bit, 0x08=56-bit, 0x10=FIPS. Returns 0 if absent.
+    private const ushort CsSecurity = 0xC002;
+
+    /// <summary>Reads the encryptionMethods bitmask the client advertised in CS_SECURITY.</summary>
+    public static uint ReadClientEncryptionMethods(ReadOnlySpan<byte> connectInitialUserData)
+    {
+        int keyIdx = IndexOf(connectInitialUserData, ClientKeyDuca);
+        if (keyIdx < 0) return 0;
+        int pos = keyIdx + ClientKeyDuca.Length;
+        _ = Asn1.ReadPerLength(connectInitialUserData, ref pos);
+
+        while (pos + 4 <= connectInitialUserData.Length)
+        {
+            ushort type = BinaryPrimitives.ReadUInt16LittleEndian(connectInitialUserData.Slice(pos, 2));
+            ushort len = BinaryPrimitives.ReadUInt16LittleEndian(connectInitialUserData.Slice(pos + 2, 2));
+            if (len < 4) break;
+            if (type == CsSecurity && pos + 8 <= connectInitialUserData.Length)
+                return BinaryPrimitives.ReadUInt32LittleEndian(connectInitialUserData.Slice(pos + 4, 4));
+            pos += len;
+        }
+        return 0;
     }
 
     private static int IndexOf(ReadOnlySpan<byte> haystack, ReadOnlySpan<byte> needle)

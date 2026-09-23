@@ -55,9 +55,12 @@ public static class McsPdu
     }
 
     /// <summary>Builds the TPKT-framed MCS Connect-Response with an embedded GCC Conference Create Response.</summary>
-    public static byte[] BuildConnectResponse(int channelCount, uint selectedProtocol)
+    public static byte[] BuildConnectResponse(int channelCount, uint selectedProtocol,
+        uint encryptionMethod = 0, uint encryptionLevel = 0,
+        byte[]? serverRandom = null, byte[]? serverCertificate = null)
     {
-        byte[] gcc = Gcc.BuildConferenceCreateResponse(channelCount, selectedProtocol);
+        byte[] gcc = Gcc.BuildConferenceCreateResponse(channelCount, selectedProtocol,
+            encryptionMethod, encryptionLevel, serverRandom, serverCertificate);
 
         var content = new ByteWriter();
         content.WriteBytes([0x0A, 0x01, 0x00]); // result = rt-successful (ENUMERATED 0)

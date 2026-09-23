@@ -57,11 +57,13 @@ the ActiveX control that is `mstsc.exe`'s own engine — so the mock is mstsc-gr
 
 Security layers: **TLS** (`PROTOCOL_SSL`, the default and preferred path) plus
 **Standard RDP Security** (`PROTOCOL_RDP`) for clients that can't or won't offer TLS —
-a policy-locked `mstsc` forced off SSL, or FreeRDP with `/sec:rdp`. Standard RDP Security
-currently runs at encryption level **NONE** (no Security Exchange; the session is in the
-clear); RC4 40/128-bit and FIPS/3DES are staged next. NLA/CredSSP (`PROTOCOL_HYBRID`)
-is still deferred. To enforce TLS only, construct the listener with
-`allowStandardRdpSecurity: false`.
+a policy-locked `mstsc` forced off SSL, or FreeRDP with `/sec:rdp`. When the client
+offers RC4, the server runs **128-bit RC4** at encryption level **LOW** (client→server
+encrypted with the proprietary server certificate + Security Exchange + salted MAC;
+server→client in the clear); otherwise it falls back to encryption **NONE**. Verified
+end-to-end against real FreeRDP `/sec:rdp` (reaches an active, rendering session).
+**FIPS/3DES** is staged next; NLA/CredSSP (`PROTOCOL_HYBRID`) is still deferred. To
+enforce TLS only, construct the listener with `allowStandardRdpSecurity: false`.
 
 ## How it fits together
 

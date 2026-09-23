@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -30,6 +31,15 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     // The security layer selected in X.224 negotiation. Ssl = TLS (enhanced security); Rdp =
     // Standard RDP Security (legacy, no TLS). Echoed back in the GCC/MCS Connect-Response.
     private RdpNegProtocol _selectedProtocol = RdpNegProtocol.Ssl;
+
+    // Standard RDP Security with RC4 encryption (b1). Active only when PROTOCOL_RDP is selected and
+    // the client offered a supported method. Level LOW: client→server encrypted, server→client clear.
+    private bool _rdpEncryption;
+    private uint _encMethod;
+    private uint _encLevel;
+    private StandardSecurity.ServerRsaKey? _serverRsaKey;
+    private byte[]? _serverRandom;
+    private StandardSecurity.SessionKeys? _sessionKeys;   // derived after the Security Exchange PDU
     // Server-side DVC plugins (loaded DLLs): channel name -> plugin; per-open, a pipe the plugin's
     // RunAsync loop reads/writes, mirroring a real WTSVirtualChannelRead/Write agent.
     private readonly Rdp.DvcPluginHost? _plugins = plugins;
@@ -286,7 +296,28 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("MCS Connect-Initial: {Count} virtual channels requested ({Names}).",
             channelCount, string.Join(", ", channels));
 
-        await WriteAsync(McsPdu.BuildConnectResponse(channelCount, (uint)_selectedProtocol), ct);
+        // Standard RDP Security: if the client offered RC4 and we're not on TLS, turn on encryption.
+        // b1 does 128-bit at level LOW (client→server encrypted; server→client stays in the clear).
+        byte[]? serverCert = null;
+        if (_selectedProtocol == RdpNegProtocol.Rdp && allowStandardRdpSecurity)
+        {
+            uint offered = Gcc.ReadClientEncryptionMethods(userData);
+            if ((offered & StandardSecurity.Method128Bit) != 0)
+            {
+                _rdpEncryption = true;
+                _encMethod = StandardSecurity.Method128Bit;
+                _encLevel = StandardSecurity.LevelLow;
+                _serverRsaKey = StandardSecurity.ServerRsaKey.Generate();
+                _serverRandom = RandomNumberGenerator.GetBytes(32);
+                serverCert = StandardSecurity.BuildProprietaryCertificate(_serverRsaKey);
+                log.LogInformation("Standard RDP Security: 128-bit RC4, level LOW (client offered 0x{O:X8}).", offered);
+            }
+            else
+                log.LogInformation("Standard RDP Security: client offered methods 0x{O:X8}; running with encryption NONE.", offered);
+        }
+
+        await WriteAsync(McsPdu.BuildConnectResponse(channelCount, (uint)_selectedProtocol,
+            _encMethod, _encLevel, _serverRandom, serverCert), ct);
         log.LogInformation("Sent MCS Connect-Response (I/O=1003, VCs=1004..{Last}, user={User}).",
             Gcc.FirstVirtualChannelId + channelCount - 1, userChannelId);
 
@@ -320,9 +351,19 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     break;
 
                 case McsDomainPdu.SendDataRequest:
+                    var (_, sendData) = McsPdu.ParseSendData(mcs);
+
+                    // With RC4 encryption, the Security Exchange PDU (encrypted client random)
+                    // arrives before the Client Info PDU. Derive the session keys from it, then
+                    // keep looping for the (now encrypted) Client Info.
+                    if (_rdpEncryption && _sessionKeys is null)
+                    {
+                        HandleSecurityExchange(sendData);
+                        break;
+                    }
+
                     log.LogInformation("MCS complete: {Joined} channels joined; Client Info received.", joined);
-                    var (_, clientInfo) = McsPdu.ParseSendData(mcs);
-                    var info = ClientInfo.Parse(clientInfo);
+                    var info = ClientInfo.Parse(UnwrapInbound(sendData));
                     _clientUser = info.User;
                     _clientDomain = info.Domain;
                     log.LogInformation("Client Info: user='{User}' domain='{Domain}' altShell='{Shell}' workDir='{Dir}'.",
@@ -337,6 +378,76 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
     }
 
+    /// <summary>Handles the Security Exchange PDU: decrypts the RSA-wrapped client random and derives
+    /// the RC4 session keys (MS-RDPBCGR 2.2.1.10 / 5.3.4). The security header here is SEC_EXCHANGE_PKT
+    /// (not encrypted); the body is [length][encryptedClientRandom].</summary>
+    private void HandleSecurityExchange(ReadOnlySpan<byte> sendData)
+    {
+        uint len = BinaryPrimitives.ReadUInt32LittleEndian(sendData.Slice(4, 4));
+        var encrypted = sendData.Slice(8, (int)len);
+        var clientRandom = _serverRsaKey!.DecryptClientRandom(encrypted);
+        _sessionKeys = new StandardSecurity.SessionKeys(clientRandom[..32], _serverRandom!, _encMethod);
+        log.LogInformation("Security Exchange: decrypted client random, RC4 session keys derived.");
+    }
+
+    /// <summary>Strips (and, when SEC_ENCRYPT is set, RC4-decrypts + MAC-verifies) the RDP security
+    /// header from an inbound Send Data payload. Only used while <see cref="_rdpEncryption"/> is on;
+    /// every inbound PDU must pass through here exactly once so the single RC4 stream stays in sync.
+    /// The Client Info PDU keeps a 4-byte header stub so <see cref="ClientInfo.Parse"/> is unchanged;
+    /// every other PDU is returned header-less, matching the enc-NONE path.</summary>
+    private byte[] UnwrapInbound(ReadOnlySpan<byte> sendData)
+    {
+        if (!_rdpEncryption) return sendData.ToArray();
+
+        ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(sendData);
+        byte[] body;
+        if ((flags & StandardSecurity.SecEncrypt) != 0)
+        {
+            var mac = sendData.Slice(4, 8);
+            body = sendData.Slice(12).ToArray();
+            bool salted = (flags & StandardSecurity.SecSecureChecksum) != 0;
+            if (!_sessionKeys!.DecryptVerify(body, mac, salted))
+                log.LogWarning("Standard RDP Security: inbound MAC verification failed.");
+        }
+        else
+        {
+            body = sendData.Slice(4).ToArray();   // security header present, not encrypted
+        }
+
+        if ((flags & StandardSecurity.SecInfoPkt) != 0)
+        {
+            var withHeader = new byte[4 + body.Length];
+            BinaryPrimitives.WriteUInt16LittleEndian(withHeader, flags);
+            body.CopyTo(withHeader, 4);
+            return withHeader;
+        }
+        return body;
+    }
+
+    /// <summary>Reads a Send Data PDU and decrypts it (when encryption is active) in one step, so a
+    /// caller always sees plaintext and the RC4 stream advances for every inbound PDU.</summary>
+    private (ushort ChannelId, byte[] Data) ParseInbound(ReadOnlySpan<byte> mcs)
+    {
+        var (channelId, data) = McsPdu.ParseSendData(mcs);
+        return (channelId, UnwrapInbound(data));
+    }
+
+    /// <summary>Builds a server→client Send Data Indication, prepending the RDP security header when
+    /// Standard RDP Security is active. At level LOW the server→client direction is not encrypted, so
+    /// this is just the 4-byte basic header (flags 0) — but the header must be present or the client
+    /// misreads the PDU. Under TLS / encryption-NONE nothing is prepended.</summary>
+    private byte[] Ind(ushort channelId, ReadOnlySpan<byte> payload, ushort secFlags = 0) =>
+        McsPdu.BuildSendDataIndication(channelId, SecOut(payload, secFlags));
+
+    private byte[] SecOut(ReadOnlySpan<byte> payload, ushort flags)
+    {
+        if (!_rdpEncryption) return payload.ToArray();
+        var outp = new byte[4 + payload.Length];
+        BinaryPrimitives.WriteUInt16LittleEndian(outp, flags);   // flags; flagsHi (bytes 2-3) = 0
+        payload.CopyTo(outp.AsSpan(4));
+        return outp;
+    }
+
     /// <summary>M3: licensing → capability exchange → finalization, ending at an active session.</summary>
     private async Task RunActivationAsync(ushort userChannelId, CancellationToken ct)
     {
@@ -345,7 +456,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         log.LogInformation("Sent licensing: valid client (no license required).");
 
         State = ConnectionState.CapabilityExchange;
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDemandActive(_width, _height)), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Capabilities.BuildDemandActive(_width, _height)), ct);
         log.LogInformation("Sent Demand Active (capabilities) at {W}x{H}.", _width, _height);
 
         State = ConnectionState.Finalization;
@@ -361,7 +472,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 continue;
             }
 
-            var (_, payload) = McsPdu.ParseSendData(mcs);
+            var (_, payload) = ParseInbound(mcs);
             int pduType = ShareControl.PduType(payload);
 
             if (pduType == (ShareControl.ConfirmActive & 0x0F))
@@ -397,17 +508,17 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     /// that complete activation — used both at connect and after a Deactivation-Reactivation.</summary>
     private async Task SendFinalizationAsync(CancellationToken ct)
     {
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildSynchronize(_userChannelId)), ct);
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlCooperate()), ct);
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildControlGranted(_userChannelId)), ct);
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Finalization.BuildFontMap()), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Finalization.BuildSynchronize(_userChannelId)), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Finalization.BuildControlCooperate()), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Finalization.BuildControlGranted(_userChannelId)), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Finalization.BuildFontMap()), ct);
     }
 
     /// <summary>M4: draws the startup test pattern (a row of colour squares) via bitmap updates.</summary>
     private async Task DrawTestPatternAsync(CancellationToken ct)
     {
         foreach (var square in Graphics.TestPattern())
-            await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
+            await WriteAsync(Ind(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
         log.LogInformation("Sent startup test pattern ({Count} bitmap updates).", Graphics.TestPattern().Count);
     }
 
@@ -530,7 +641,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         int tiles = 0, bytes = 0;
         foreach (var (x, y, w, h, pixels) in _desktop.DirtyTiles())
         {
-            var pdu = McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels));
+            var pdu = Ind(Gcc.IoChannelId, Graphics.BuildBitmapTile(x, y, w, h, pixels));
             await _stream.WriteAsync(pdu, ct);
             tiles++;
             bytes += pdu.Length;
@@ -601,8 +712,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         _width = width;
         _height = height;
 
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDeactivateAll()), ct);
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Capabilities.BuildDemandActive(_width, _height)), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Capabilities.BuildDeactivateAll()), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Capabilities.BuildDemandActive(_width, _height)), ct);
 
         // Read the client's re-finalization: it re-sends Confirm Active then the Font List.
         while (true)
@@ -613,7 +724,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
             var mcs = Cotp.StripDataTpdu(frame.Value.Payload);
             if (McsPdu.ClassifyDomainPdu(mcs) != McsDomainPdu.SendDataRequest) continue;
-            var (channelId, data) = McsPdu.ParseSendData(mcs);
+            var (channelId, data) = ParseInbound(mcs);                     // decrypts to keep RC4 in sync
             if (channelId != Gcc.IoChannelId) continue;                    // ignore VC traffic mid-resize
             if (ShareControl.PduType(data) == (ShareControl.Data & 0x0F)
                 && Finalization.DataPduType2(data) == Finalization.Pdu2FontList)
@@ -643,7 +754,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         var mcs = Cotp.StripDataTpdu(tpdu);
         if (McsPdu.ClassifyDomainPdu(mcs) != McsDomainPdu.SendDataRequest) return;
 
-        var (channelId, data) = McsPdu.ParseSendData(mcs);
+        var (channelId, data) = ParseInbound(mcs);   // decrypts (RC4) when Standard RDP Security is on
 
         // Slow-path input (TS_INPUT_PDU) on the I/O channel — mstsc/mstscax send input this way
         // rather than fast-path even when fast-path is advertised.
@@ -670,7 +781,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     // The client (e.g. closing mstsc) asked to log off. Deny it, as a real host with
                     // no clean logoff does — mstsc then shows its "disconnect?" confirmation dialog.
                     log.LogInformation("Client sent Shutdown Request — denied (client will confirm).");
-                    await WriteAsync(McsPdu.BuildSendDataIndication(
+                    await WriteAsync(Ind(
                         Gcc.IoChannelId, Finalization.BuildDataPdu(Finalization.Pdu2ShutdownDenied, default)), ct);
                 }
                 else
@@ -801,7 +912,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         LogChannel("cliprdr", false, cliprdrPdu.Length, $"msgType 0x{Clipboard.ReadMsgType(cliprdrPdu):X4}");
         // Chunk large payloads (e.g. big FileContents responses) to the negotiated VC chunk size.
         foreach (var chunk in VirtualChannel.WrapChunked(cliprdrPdu))
-            await WriteAsync(McsPdu.BuildSendDataIndication(_cliprdrChannelId, chunk), ct);
+            await WriteAsync(Ind(_cliprdrChannelId, chunk), ct);
     }
 
     /// <summary>Opens the DVC layer: advertise capabilities. Channels are created once the
@@ -1107,7 +1218,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     }
 
     private Task SendDvcAsync(byte[] dvcPdu, CancellationToken ct) =>
-        WriteAsync(McsPdu.BuildSendDataIndication(_drdynvcChannelId, VirtualChannel.Wrap(dvcPdu)), ct);
+        WriteAsync(Ind(_drdynvcChannelId, VirtualChannel.Wrap(dvcPdu)), ct);
 
     /// <summary>Relay one channel message to the bridged agent (client → agent), connecting on first
     /// use and starting the reverse pump (agent → client). The mock stays a dumb byte relay — the real
@@ -1362,12 +1473,24 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private Task SendRdpdrAsync(byte[] pdu, CancellationToken ct)
     {
         LogChannel("rdpdr", false, pdu.Length, $"packetId 0x{Rdpdr.PacketId(pdu):X4}");
-        return WriteAsync(McsPdu.BuildSendDataIndication(_rdpdrChannelId, VirtualChannel.Wrap(pdu)), ct);
+        return WriteAsync(Ind(_rdpdrChannelId, VirtualChannel.Wrap(pdu)), ct);
     }
 
     /// <summary>Decodes fast-path input; feeds the desktop, or draws markers in non-desktop mode.</summary>
     private async Task HandleInputAsync(byte fastPathHeader, byte[] payload, CancellationToken ct)
     {
+        // Encrypted fast-path input (FASTPATH_INPUT_ENCRYPTED, header bit 7): an 8-byte MAC precedes
+        // the RC4-encrypted events. Decrypt in place so the shared inbound RC4 stream stays in sync.
+        if (_rdpEncryption && (fastPathHeader & 0x80) != 0 && payload.Length >= 8)
+        {
+            var mac = payload.AsSpan(0, 8);
+            var body = payload.AsSpan(8).ToArray();
+            bool salted = (fastPathHeader & 0x40) != 0;   // FASTPATH_INPUT_SECURE_CHECKSUM
+            if (!_sessionKeys!.DecryptVerify(body, mac, salted))
+                log.LogWarning("Standard RDP Security: fast-path input MAC verification failed.");
+            payload = body;
+        }
+
         var events = Input.ParseFastPath(fastPathHeader, payload);
         LogChannel("input", true, payload.Length, InputSummary(events), render: false);
         if (_desktop is not null) { await ApplyInputAsync(events, ct); return; }
@@ -1456,7 +1579,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         if (_desktop.JustSignedIn)
         {
             _desktop.JustSignedIn = false;
-            await WriteAsync(McsPdu.BuildSendDataIndication(
+            await WriteAsync(Ind(
                 Gcc.IoChannelId, Finalization.BuildSaveSessionInfo("MOCK", _desktop.LogonUser, 1)), ct);
             log.LogInformation("Sent Save Session Info (logon) PDU for user '{User}'.", _desktop.LogonUser);
         }
@@ -1475,7 +1598,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         int mx = Math.Clamp((int)x, 0, _width - size);
         int my = Math.Clamp((int)y, 0, _height - size);
         var square = new Graphics.Square(mx, my, size, Graphics.Rgb565(255, 255, 0)); // yellow
-        await WriteAsync(McsPdu.BuildSendDataIndication(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
+        await WriteAsync(Ind(Gcc.IoChannelId, Graphics.BuildSolidSquare(square)), ct);
     }
 
     /// <summary>Reads one frame, distinguishing TPKT (slow-path) from fast-path framing.</summary>
