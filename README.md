@@ -48,6 +48,7 @@ Grab both from the [latest release](https://github.com/guscatalano/MockRDPServer
 | M6 | Clipboard virtual channel (CLIPRDR) | ✅ done |
 | M7 | Dynamic virtual channels (DRDYNVC / MS-RDPEDYC) | ✅ done |
 | M8 | Drive redirection read/list/write (rdpdr / MS-RDPEFS) + scripted/fault DVCs | ✅ done |
+| M9 | Security layers: Standard RDP Security (RC4 40/56/128, Low/High), RDSTLS, NLA/CredSSP | ✅ done |
 
 All originally planned milestones are complete: a real RDP client connects end-to-end,
 sees rendered graphics, drives the screen with keyboard/mouse, and exchanges clipboard
