@@ -14,6 +14,28 @@ and **FreeRDP**.
 > Every screenshot in this README is a real frame the server renders — reproduce any of them
 > with `MockRdp --screenshot <file>.png <mode>` (see [Screens](#screens)). No display required.
 
+## Get started — which exe do I run?
+
+Two entry points ship side by side. **If you just want to poke at a session, run the tray.**
+
+| I want to… | Run this | What you get |
+|---|---|---|
+| Click around a fake RDP session | **`MockRdpTray.exe`** | Serves the moment it launches and sits in the system tray. Right-click → **Connect Remote Desktop**, or double-click the tray icon. No command line, no cert prompt, no `.rdp` to hand-write. |
+| Script it / CI / screenshots / tests | **`MockRdp.exe`** | The console server, driven by flags: `--port`, `--desktop`, `--dvc`, `--screenshot`, … (see [Build & run](#build--run)). |
+
+The **tray** does the fiddly parts for you: it pins its self-signed certificate for mstsc (so
+there's no "do you trust this connection?"), writes a credential-less `.rdp` (no login prompt),
+and launches Remote Desktop. Everything else is a menu toggle — **port**, loopback vs **LAN**,
+which **DVC channels** to open, redirections, start-at-desktop, auto-connect, start-at-logon and
+**log level** — and your choices persist across restarts.
+
+> Bare **`MockRdp.exe`** with no arguments just opens the tray (when both exes sit in the same
+> folder, as they do in the release download). So double-clicking *either* exe lands you in the
+> easy path; the console server only kicks in when you pass flags.
+
+Grab both from the [latest release](https://github.com/guscatalano/MockRDPServer/releases/latest)
+— self-contained single-file exes, no .NET install required.
+
 ## Status
 
 | Milestone | Scope | State |
@@ -114,9 +136,11 @@ MockRdp --screenshot files.png   --demo           # Explorer browsing into a Not
 
 ## Layout
 
-- `src/MockRdp/` — the server. `Framing/` (TPKT), `X224/` (COTP + negotiation, class `Cotp`),
-  `Transport/` (self-signed cert), `Server/` (listener + per-connection state machine),
-  `Desktop/` (fake desktop + renderer), `Rdp/` (input, graphics, DVC), `Util/`.
+- `src/MockRdp/` — the server (console exe, `MockRdp.exe`). `Framing/` (TPKT), `X224/` (COTP +
+  negotiation, class `Cotp`), `Transport/` (self-signed cert), `Server/` (listener + per-connection
+  state machine), `Desktop/` (fake desktop + renderer), `Rdp/` (input, graphics, DVC), `Util/`.
+- `src/MockRdp.Tray/` — the system-tray app (`MockRdpTray.exe`): hosts the server in-process and
+  puts every knob (port, LAN, DVC channels, redirections, connect, log level) in the tray menu.
 - `tests/MockRdp.Tests/` — xUnit. `Harness/RdpTestClient.cs` is the growing in-process
   conformance client; `Harness/MockServerFixture.cs` spins up a loopback server per test.
 - `scripts/` — real-client checkpoint automation (see below).
@@ -137,10 +161,14 @@ persisted (no cert-store or registry changes).
 
 ```pwsh
 dotnet test                                   # unit + in-process end-to-end (Tier 1)
+dotnet run --project src/MockRdp.Tray                             # system-tray app: serve + one-click connect
 dotnet run --project src/MockRdp -- --port 3389 --log-level trace
 dotnet run --project src/MockRdp -- --desktop                     # interactive fake desktop
 dotnet run --project src/MockRdp -- --dvc "dvc::diag::inspector"  # open a specific DVC
 ```
+
+The **tray** (`src/MockRdp.Tray`) is the no-arguments path — see
+[Get started](#get-started--which-exe-do-i-run). The flags below drive the **console** server.
 
 Server flags: `--port <n>` (default 3389), `--bind <ip>`, `--log-level trace|debug|info|warn|error`.
 
@@ -182,17 +210,19 @@ across the negotiated VC chunk size).
 
 ## CI & prebuilt binary
 
-`.github/workflows/ci.yml` builds and tests on every push/PR and publishes a **self-contained
-single-file `MockRdp.exe`** (win-x64) as the `mockrdp-win-x64` workflow artifact — runnable
-with no .NET runtime installed. Tagging `v*` (or running the Release workflow) attaches the
-same exe to a GitHub Release, so consumers can fetch a stable URL:
+`.github/workflows/ci.yml` builds and tests on every push/PR and publishes **self-contained
+single-file** `MockRdp.exe` **and** `MockRdpTray.exe` (win-x64) as the `mockrdp-win-x64`
+workflow artifact — runnable with no .NET runtime installed. Tagging `v*` (or running the
+Release workflow) attaches both to a GitHub Release, so consumers can fetch stable URLs:
 
 ```
-https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdp.exe
+https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdpTray.exe   # tray (run this)
+https://github.com/guscatalano/MockRDPServer/releases/latest/download/MockRdp.exe       # console/CI
 ```
 
-This is what a downstream project (e.g. RDPeek) downloads to spin up a real DVC-capable RDP
-target in its own integration tests.
+`MockRdp.exe` is what a downstream project (e.g. RDPeek) downloads to spin up a real DVC-capable
+RDP target in its own integration tests; `MockRdpTray.exe` is the one a human runs. Keep them in
+the same folder so a bare `MockRdp.exe` can hand off to the tray.
 
 ## Real-client checkpoints (automation)
 
