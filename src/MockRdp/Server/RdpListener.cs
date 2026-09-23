@@ -27,6 +27,7 @@ public sealed class RdpListener : IDisposable
     private readonly bool _allowStandardRdpSecurity;
     private readonly uint _preferredRdpEncryption;
     private readonly bool _rdpHighEncryption;
+    private readonly bool _enableNla;
 
     public RdpListener(IPAddress address, int port, X509Certificate2 cert, ILoggerFactory loggerFactory,
         string[]? dvcChannels = null, string[]? rdpdrReads = null,
@@ -37,11 +38,13 @@ public sealed class RdpListener : IDisposable
         Rdp.DvcPluginHost? plugins = null,
         bool allowStandardRdpSecurity = true,
         uint preferredRdpEncryption = Rdp.StandardSecurity.Method128Bit,
-        bool rdpHighEncryption = false)
+        bool rdpHighEncryption = false,
+        bool enableNla = false)
     {
         _allowStandardRdpSecurity = allowStandardRdpSecurity;
         _preferredRdpEncryption = preferredRdpEncryption;
         _rdpHighEncryption = rdpHighEncryption;
+        _enableNla = enableNla;
         _vfsRoot = vfsRoot;
         _dvcBridges = dvcBridges;
         _plugins = plugins;
@@ -96,7 +99,7 @@ public sealed class RdpListener : IDisposable
             {
                 var conn = new RdpConnection(client, _cert, log, _dvcChannels, _rdpdrReads, _dvcBehaviors,
                     _rdpdrLists, _rdpdrWrites, _desktop, _logon, _desktopDirect, _vfsRoot, _dvcBridges, _plugins,
-                    _allowStandardRdpSecurity, _preferredRdpEncryption, _rdpHighEncryption);
+                    _allowStandardRdpSecurity, _preferredRdpEncryption, _rdpHighEncryption, _enableNla);
                 await conn.RunAsync(ct);
             }
         }

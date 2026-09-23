@@ -231,7 +231,8 @@ if (lvlIdx >= 0 && lvlIdx + 1 < args.Length)
 using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
     rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"),
     dvcBridges: dvcBridges.Count > 0 ? dvcBridges : null,
-    plugins: pluginHost, preferredRdpEncryption: preferredEnc, rdpHighEncryption: highEnc);
+    plugins: pluginHost, preferredRdpEncryption: preferredEnc, rdpHighEncryption: highEnc,
+    enableNla: args.Contains("--nla"));
 listener.Start();
 
 using var cts = new CancellationTokenSource();

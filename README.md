@@ -72,7 +72,12 @@ TLS only.
 **RDSTLS** (`PROTOCOL_RDSTLS`) is also supported: TLS plus the RDSTLS authentication PDU
 exchange (Capabilities → Authentication Request → Authentication Response, MS-RDPBCGR
 2.2.17) used for RD Gateway / redirection reconnects. The mock accepts any credentials.
-NLA/CredSSP (`PROTOCOL_HYBRID`) remains deferred.
+
+**NLA / CredSSP** (`PROTOCOL_HYBRID`) is supported with `--nla` (off by default): TLS then
+the CredSSP TSRequest handshake (MS-CSSP) with the public-key channel binding. The NTLM
+handshake and message sealing are done by Windows **SSPI**, so credentials are validated
+against **this host** — use a local account (loopback works with the current user). Without
+`--nla` a HYBRID offer is downgraded to plain TLS.
 
 ## How it fits together
 

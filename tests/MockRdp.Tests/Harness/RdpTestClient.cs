@@ -25,6 +25,15 @@ public sealed class RdpTestClient : IAsyncDisposable
     /// <summary>The active stream (TLS once upgraded, otherwise the raw socket).</summary>
     public Stream Stream => _ssl ?? _stream;
 
+    /// <summary>The server's TLS certificate SubjectPublicKeyInfo — the public key CredSSP binds to.</summary>
+    public byte[] ServerPublicKeyInfo()
+    {
+        var cert = _ssl!.RemoteCertificate!;
+        using var c2 = cert as System.Security.Cryptography.X509Certificates.X509Certificate2
+                       ?? new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
+        return c2.PublicKey.ExportSubjectPublicKeyInfo();
+    }
+
     public async Task ConnectAsync(IPEndPoint endpoint, CancellationToken ct = default)
     {
         await _tcp.ConnectAsync(endpoint, ct);

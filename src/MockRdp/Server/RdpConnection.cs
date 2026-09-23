@@ -27,7 +27,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     Rdp.DvcPluginHost? plugins = null,
     bool allowStandardRdpSecurity = true,
     uint preferredRdpEncryption = Rdp.StandardSecurity.Method128Bit,
-    bool rdpHighEncryption = false)
+    bool rdpHighEncryption = false,
+    bool enableNla = false)
 {
     private bool _nlaRequested;
     // The security layer selected in X.224 negotiation. Ssl = TLS (enhanced security); Rdp =
@@ -222,7 +223,22 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // not offer TLS (a policy-locked mstsc forced off SSL, or FreeRDP `/sec:rdp`) falls back to
         // Standard RDP Security when allowed; otherwise it is rejected (TLS-only posture).
         bool offersRdstls = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.RdsTls) != 0;
+        bool offersHybrid = cr.HasNegReq && (cr.RequestedProtocols & (RdpNegProtocol.Hybrid | RdpNegProtocol.HybridEx)) != 0;
         bool offersTls = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.Ssl) != 0;
+
+        // NLA / CredSSP (MS-CSSP over TLS). Opt-in (`enableNla`): credentials are validated by Windows
+        // SSPI against this host, so it is off by default to keep the HYBRID→TLS downgrade for clients
+        // whose credentials this machine can't validate.
+        if (offersHybrid && enableNla)
+        {
+            _selectedProtocol = RdpNegProtocol.Hybrid;
+            await WriteAsync(Cotp.BuildConnectionConfirm(RdpNegProtocol.Hybrid, negRspFlags: 0x01), ct);
+            log.LogInformation("Sent Connection Confirm selecting PROTOCOL_HYBRID (NLA); starting TLS + CredSSP.");
+            if (!await EstablishTlsAsync(ct)) return;
+            if (!await RunNlaAsync(ct)) return;
+            await RunMcsAsync(ct);
+            return;
+        }
 
         // RDSTLS (MS-RDPBCGR 2.2.17): TLS transport plus an RDSTLS authentication PDU exchange — the
         // security protocol used for RD Gateway / redirection reconnects. Selected when offered.
@@ -322,6 +338,125 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         await WriteAsync(Rdstls.BuildAuthResponse(Rdstls.ResultSuccess), ct);
         log.LogInformation("RDSTLS: sent Authentication Response (success).");
         return true;
+    }
+
+    /// <summary>Runs the CredSSP / NLA exchange over TLS (MS-CSSP). The NTLM handshake and the message
+    /// sealing are done by Windows SSPI (<see cref="System.Net.Security.NegotiateAuthentication"/>);
+    /// this drives the TSRequest envelope and the public-key channel binding. Credentials are validated
+    /// by SSPI against this host. Returns false if authentication or the binding check fails.</summary>
+    private async Task<bool> RunNlaAsync(CancellationToken ct)
+    {
+        byte[] pubKey = cert.PublicKey.ExportSubjectPublicKeyInfo();   // TLS cert SubjectPublicKeyInfo
+        using var nego = new System.Net.Security.NegotiateAuthentication(
+            new System.Net.Security.NegotiateAuthenticationServerOptions
+            {
+                RequiredProtectionLevel = System.Net.Security.ProtectionLevel.EncryptAndSign,
+            });
+
+        byte[]? clientNonce = null;
+        int version = 6;
+
+        while (true)
+        {
+            var req = await ReadTSRequestAsync(ct);
+            if (req is null) { log.LogWarning("NLA: closed during CredSSP exchange."); return false; }
+            version = req.Version;
+            if (req.ClientNonce is not null) clientNonce = req.ClientNonce;
+
+            byte[]? outToken = req.NegoToken is not null
+                ? nego.GetOutgoingBlob(req.NegoToken, out _)
+                : null;
+
+            if (!nego.IsAuthenticated)
+            {
+                await WriteAsync(CredSsp.Encode(new CredSsp.TSRequest { Version = version, NegoToken = outToken }), ct);
+                continue;
+            }
+
+            // Authenticated (the client's final nego token also carried pubKeyAuth + clientNonce).
+            if (req.PubKeyAuth is null || clientNonce is null)
+            {
+                log.LogWarning("NLA: authenticated but no pubKeyAuth/clientNonce — cannot bind.");
+                return false;
+            }
+
+            var expected = BindingHash("CredSSP Client-To-Server Binding Hash\0", clientNonce, pubKey);
+            if (!Unwrap(nego, req.PubKeyAuth).AsSpan().SequenceEqual(expected))
+            {
+                log.LogWarning("NLA: client public-key binding hash mismatch (possible MITM).");
+                return false;
+            }
+
+            var serverBinding = Wrap(nego, BindingHash("CredSSP Server-To-Client Binding Hash\0", clientNonce, pubKey));
+            await WriteAsync(CredSsp.Encode(new CredSsp.TSRequest
+            {
+                Version = version, NegoToken = outToken, PubKeyAuth = serverBinding,
+            }), ct);
+
+            // Final message: the encrypted TSCredentials.
+            var final = await ReadTSRequestAsync(ct);
+            if (final?.AuthInfo is not null)
+            {
+                var (domain, user) = CredSsp.DecodePasswordCredentials(Unwrap(nego, final.AuthInfo));
+                _clientUser = user;
+                _clientDomain = domain;
+            }
+            _nlaRequested = true;
+            log.LogInformation("NLA: authenticated as '{User}' (SSPI: {Sspi}).",
+                string.IsNullOrEmpty(_clientDomain) ? _clientUser : $@"{_clientDomain}\{_clientUser}",
+                nego.RemoteIdentity?.Name ?? "?");
+            return true;
+        }
+    }
+
+    private static byte[] BindingHash(string magic, byte[] nonce, byte[] pubKey)
+    {
+        var m = System.Text.Encoding.ASCII.GetBytes(magic);   // includes the trailing NUL in `magic`
+        var buf = new byte[m.Length + nonce.Length + pubKey.Length];
+        m.CopyTo(buf, 0);
+        nonce.CopyTo(buf, m.Length);
+        pubKey.CopyTo(buf, m.Length + nonce.Length);
+        return System.Security.Cryptography.SHA256.HashData(buf);
+    }
+
+    private static byte[] Wrap(System.Net.Security.NegotiateAuthentication nego, byte[] data)
+    {
+        var w = new System.Buffers.ArrayBufferWriter<byte>();
+        nego.Wrap(data, w, requestEncryption: true, out _);
+        return w.WrittenSpan.ToArray();
+    }
+
+    private static byte[] Unwrap(System.Net.Security.NegotiateAuthentication nego, byte[] data)
+    {
+        var w = new System.Buffers.ArrayBufferWriter<byte>();
+        nego.Unwrap(data, w, out _);
+        return w.WrittenSpan.ToArray();
+    }
+
+    /// <summary>Reads one DER-encoded TSRequest from the TLS stream (tag + length + content).</summary>
+    private async Task<CredSsp.TSRequest?> ReadTSRequestAsync(CancellationToken ct)
+    {
+        var head = new byte[2];
+        try { await _stream.ReadExactlyAsync(head, ct); }
+        catch (EndOfStreamException) { return null; }
+        catch (IOException) { return null; }
+
+        var header = new List<byte> { head[0], head[1] };
+        int len;
+        if ((head[1] & 0x80) == 0) len = head[1];
+        else
+        {
+            int n = head[1] & 0x7F;
+            var lb = new byte[n];
+            await _stream.ReadExactlyAsync(lb, ct);
+            header.AddRange(lb);
+            len = 0;
+            foreach (var b in lb) len = (len << 8) | b;
+        }
+
+        var content = new byte[len];
+        await _stream.ReadExactlyAsync(content, ct);
+        return CredSsp.Decode(header.Concat(content).ToArray());
     }
 
     /// <summary>M2: MCS Connect-Initial/Response, then Erect Domain / Attach User / Channel Join.</summary>
@@ -627,6 +762,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     /// Standard RDP Security, the RC4 method and encryption level.</summary>
     private string SecurityDescription() => _selectedProtocol switch
     {
+        RdpNegProtocol.Hybrid or RdpNegProtocol.HybridEx => "TLS + NLA (CredSSP)",
         RdpNegProtocol.RdsTls => "RDSTLS (TLS + RDSTLS auth)",
         RdpNegProtocol.Rdp when _rdpEncryption =>
             $"Standard RDP Security · {StandardSecurity.MethodName(_encMethod)} · " +
