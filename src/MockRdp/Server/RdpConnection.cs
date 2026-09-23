@@ -103,6 +103,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
 
     /// <summary>The channels shown in the Monitor's picker: the core I/O traffic (input, graphics),
     /// the open static virtual channels, and the drdynvc transport with its dynamic channels.</summary>
+    private IReadOnlyList<string> BuildFailableSvcs()
+    {
+        var list = new List<string>();
+        if (_cliprdrChannelId != 0) list.Add("cliprdr");
+        if (_rdpdrChannelId != 0) list.Add("rdpdr");
+        return list;
+    }
+
     private IReadOnlyList<string> BuildChannels()
     {
         var list = new List<string> { "input", "graphics" };
@@ -393,6 +401,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
             DvcTraffic = () => _dvcLog.ToArray(),
             DvcChannels = BuildChannels,
             DvcOpenNames = () => _dvcOpen.Values.Distinct().ToArray(),   // real DVCs the chaos window can fail
+            SvcNames = BuildFailableSvcs,                                 // static channels it can toggle-fail
             ClipboardAvailable = () => _cliprdrChannelId != 0,
         };
         log.LogInformation("Fake desktop booting to {Boot} (NLA requested: {Nla}).",
@@ -644,6 +653,20 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                 }
             }
             return;
+        }
+
+        // SVC chaos: drop inbound traffic on a static channel the user toggle-failed in DVC Chaos.
+        if (_desktop?.Chaos.FailedSvcs is { Count: > 0 } failed)
+        {
+            string? svc = channelId == _cliprdrChannelId && _cliprdrChannelId != 0 ? "cliprdr"
+                        : channelId == _rdpdrChannelId && _rdpdrChannelId != 0 ? "rdpdr"
+                        : null;
+            if (svc is not null && failed.Contains(svc))
+            {
+                LogChannel(svc, true, data.Length, "CHAOS drop (SVC)");
+                log.LogWarning("CHAOS: dropped {N} B on SVC '{Svc}'.", data.Length, svc);
+                return;
+            }
         }
 
         if (channelId == _cliprdrChannelId && _cliprdrChannelId != 0)

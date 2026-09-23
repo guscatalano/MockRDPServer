@@ -248,8 +248,11 @@ how a client plugin/agent copes:
 
 - **Random chaos**: toggle on and set a percentage; each DVC message then has that chance to be
   **dropped, delayed, or have its channel closed**, across every channel (echo, diag, bridged, plugin).
-- **Force-fail a specific channel**: the window lists the open DVCs, each with a **Fail** button that
+- **Force-fail a specific DVC**: the window lists the open DVCs, each with a **Fail** button that
   tears that one down now.
+- **Drop a static channel (SVC)**: toggle **cliprdr** / **rdpdr** to drop that channel's inbound
+  traffic — clipboard or drive redirection stops until you toggle it back. (Chaos is scoped to
+  virtual channels; the desktop, keyboard and mouse ride core RDP and keep working.)
 
 (Set faults at launch instead with `--dvc-fault <channel>=<fragment|drop|close|truncate|delay>`.)
 

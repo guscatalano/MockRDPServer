@@ -24,7 +24,11 @@ public class DvcChaosTests
     {
         // The DVC Chaos window opens as the 2nd window (after Welcome): n=1 → X=186, Y=136, W=440,
         // TitleH=30. Button rects come straight from FakeDesktop.ChaosToggle/ChaosPlus/ChaosFailRect.
-        var d = new FakeDesktop(1024, 768, logon: false, vfsRoot: null) { DvcOpenNames = () => ["dvc::diag::inspector", "ECHO"] };
+        var d = new FakeDesktop(1024, 768, logon: false, vfsRoot: null)
+        {
+            DvcOpenNames = () => ["dvc::diag::inspector", "ECHO"],
+            SvcNames = () => ["cliprdr", "rdpdr"],
+        };
         d.OpenApp("DVC Chaos");
 
         Assert.False(d.Chaos.Enabled);
@@ -36,8 +40,11 @@ public class DvcChaosTests
         d.OnInput(Click(438, 268));            // "+10"      (ChaosPlus centre)
         Assert.Equal(35, d.Chaos.Percent);
 
-        d.OnInput(Click(580, 327));            // "Fail" on the first listed channel (ChaosFailRect index 0)
+        d.OnInput(Click(580, 327));            // "Fail" on the first listed DVC (ChaosFailRect index 0)
         Assert.Contains("dvc::diag::inspector", d.TakeChaosKills());
+
+        d.OnInput(Click(248, 479));            // toggle-fail the first SVC (ChaosSvcRect index 0)
+        Assert.Contains("cliprdr", d.Chaos.FailedSvcs);
     }
 
     [Fact]

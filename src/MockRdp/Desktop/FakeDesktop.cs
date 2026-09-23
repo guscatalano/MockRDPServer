@@ -76,8 +76,17 @@ public sealed class FakeDesktop : IDisposable
 
     /// <summary>Runtime chaos knob toggled from the in-session "DVC Chaos" window: when Enabled, the
     /// host fails a <see cref="ChaosState.Percent"/> chance of each DVC message (drop / delay / close).</summary>
-    public sealed class ChaosState { public bool Enabled; public int Percent = 25; }
+    public sealed class ChaosState
+    {
+        public bool Enabled;      // random chaos on DVC messages
+        public int Percent = 25;
+        /// <summary>Static virtual channels (cliprdr/rdpdr/…) whose inbound traffic the host drops.</summary>
+        public readonly HashSet<string> FailedSvcs = new(StringComparer.OrdinalIgnoreCase);
+    }
     public ChaosState Chaos { get; } = new();
+
+    /// <summary>The open static virtual channels the DVC Chaos window can toggle-fail (cliprdr, rdpdr).</summary>
+    public Func<IReadOnlyList<string>>? SvcNames;
 
     /// <summary>The actual open dynamic virtual channels (raw names) — what the DVC Chaos window can
     /// force-fail. Distinct from <see cref="DvcChannels"/>, which also lists input/graphics/SVCs for
@@ -684,7 +693,7 @@ public sealed class FakeDesktop : IDisposable
             case "Display": Open(new Win { Kind = WinKind.Display, Title = "Display settings", W = 320, H = 290 }); break;
             case "Channel Monitor": Open(new Win { Kind = WinKind.DvcMon, Title = "Channel Monitor — input · graphics · SVC · DVC", W = 640, H = 400 }); break;
             case "DVC Console": Open(new Win { Kind = WinKind.DvcApp, Title = "DVC Console — send on a channel", W = 440, H = 230 }); break;
-            case "DVC Chaos": Open(new Win { Kind = WinKind.Chaos, Title = "DVC Chaos — fail channels", W = 440, H = 340 }); break;
+            case "DVC Chaos": Open(new Win { Kind = WinKind.Chaos, Title = "DVC Chaos — fail channels", W = 440, H = 410 }); break;
             case "Settings": Open(new Win { Title = "Settings", Body = "Settings.", W = 420, H = 240 }); break;
             default: Open(new Win { Kind = WinKind.Run, Title = "Run", W = 420, H = 160 }); break;
         }
@@ -925,6 +934,7 @@ public sealed class FakeDesktop : IDisposable
     private static int[] ChaosMinus(Win w) => [w.X + 180, w.Y + TitleH + 86, 44, 32];
     private static int[] ChaosPlus(Win w) => [w.X + 230, w.Y + TitleH + 86, 44, 32];
     private static int[] ChaosFailRect(Win w, int index) => [w.X + w.W - 74, w.Y + TitleH + 150 + index * 26, 56, 22];
+    private static int[] ChaosSvcRect(Win w, int index) => [w.X + 16 + index * 100, w.Y + TitleH + 300, 92, 26];
 
     private bool ChaosClick(Win w, int x, int y)
     {
@@ -934,11 +944,21 @@ public sealed class FakeDesktop : IDisposable
 
         // Force-fail a specific open channel: hit-test the "Fail" button on each listed row.
         var channels = DvcOpenNames?.Invoke() ?? [];
-        for (int i = 0; i < channels.Count && i < 5; i++)
+        for (int i = 0; i < channels.Count && i < 4; i++)
             if (InRect(x, y, ChaosFailRect(w, i)))
             {
                 _chaosKills.Add(channels[i]);
                 Emit($"Force-failing DVC '{channels[i]}'");
+                return true;
+            }
+
+        // Toggle-fail a static virtual channel (drops its inbound traffic until toggled back).
+        var svcs = SvcNames?.Invoke() ?? [];
+        for (int i = 0; i < svcs.Count && i < 4; i++)
+            if (InRect(x, y, ChaosSvcRect(w, i)))
+            {
+                if (!Chaos.FailedSvcs.Remove(svcs[i])) Chaos.FailedSvcs.Add(svcs[i]);
+                Emit($"SVC '{svcs[i]}' {(Chaos.FailedSvcs.Contains(svcs[i]) ? "FAILING" : "restored")}");
                 return true;
             }
         return false;
@@ -965,17 +985,30 @@ public sealed class FakeDesktop : IDisposable
         Fill(ctx, "DDDDDD", pl[0], pl[1], pl[2], pl[3]);
         Text(ctx, _small, "+10", pl[0] + 8, pl[1] + 8, Color.ParseHex("101010"));
 
-        // Force-fail a specific channel: list the open DVCs, each with a red Fail button.
-        Text(ctx, _small, "Force-fail a channel:", w.X + 14, w.Y + TitleH + 130, Color.ParseHex("505050"));
+        // Force-fail a specific DVC: list the open DVCs, each with a red Fail button.
+        Text(ctx, _small, "Force-fail a DVC:", w.X + 14, w.Y + TitleH + 130, Color.ParseHex("505050"));
         var channels = DvcOpenNames?.Invoke() ?? [];
         if (channels.Count == 0)
             Text(ctx, _small, "(no DVCs open yet)", w.X + 20, w.Y + TitleH + 152, Color.ParseHex("909090"));
-        for (int i = 0; i < channels.Count && i < 5; i++)
+        for (int i = 0; i < channels.Count && i < 4; i++)
         {
             var fr = ChaosFailRect(w, i);
             Text(ctx, _small, channels[i], w.X + 20, fr[1] + 4, Color.ParseHex("101010"));
             Fill(ctx, "B00020", fr[0], fr[1], fr[2], fr[3]);
             Text(ctx, _small, "Fail", fr[0] + 14, fr[1] + 4, Color.ParseHex("FFFFFF"));
+        }
+
+        // Toggle-fail a static virtual channel (clipboard / drive) — drops its inbound traffic.
+        Text(ctx, _small, "Drop a static channel (SVC):", w.X + 14, w.Y + TitleH + 280, Color.ParseHex("505050"));
+        var svcs = SvcNames?.Invoke() ?? [];
+        if (svcs.Count == 0)
+            Text(ctx, _small, "(none open)", w.X + 20, w.Y + TitleH + 300 + 4, Color.ParseHex("909090"));
+        for (int i = 0; i < svcs.Count && i < 4; i++)
+        {
+            var sr = ChaosSvcRect(w, i);
+            bool failing = Chaos.FailedSvcs.Contains(svcs[i]);
+            Fill(ctx, failing ? "B00020" : "308030", sr[0], sr[1], sr[2], sr[3]);
+            Text(ctx, _small, (failing ? "✗ " : "") + svcs[i], sr[0] + 8, sr[1] + 5, Color.ParseHex("FFFFFF"));
         }
     }
 
