@@ -5,6 +5,7 @@ using System.Text;
 using System.Windows.Forms;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
+using MockRdp.Rdp;
 using MockRdp.Server;
 using MockRdp.Transport;
 
@@ -43,6 +44,8 @@ internal sealed class TrayApp : IDisposable
     private bool _autoConnect;             // launch mstsc automatically when the server starts
     private LogLevel _logLevel = LogLevel.Information;
     private readonly HashSet<string> _channels = new(DefaultChannels, StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> _pluginPaths = new();   // server-side DVC plugin DLLs to load
+    private ToolStripMenuItem _pluginStatus = null!;
     private readonly Redir _redir = new();
 
     private bool Running => _listener is not null;
@@ -130,6 +133,14 @@ internal sealed class TrayApp : IDisposable
         }
         _menu.Items.Add(dvc);
 
+        // Server-side DVC plugins — load a DLL implementing IServerDvcPlugin (MockRdp.Plugin).
+        var pluginMenu = new ToolStripMenuItem("Server-side DVC plugin");
+        _pluginStatus = new ToolStripMenuItem(PluginStatusText()) { Enabled = false };
+        pluginMenu.DropDownItems.Add(_pluginStatus);
+        pluginMenu.DropDownItems.Add(new ToolStripMenuItem("Load plugin DLL…", null, (_, _) => LoadPluginDialog()));
+        pluginMenu.DropDownItems.Add(new ToolStripMenuItem("Clear plugins", null, (_, _) => ClearPlugins()));
+        _menu.Items.Add(pluginMenu);
+
         var redir = new ToolStripMenuItem("Redirections (written to the .rdp)");
         void AddRedir(string label, Func<bool> get, Action<bool> set)
         {
@@ -198,6 +209,35 @@ internal sealed class TrayApp : IDisposable
         Balloon($"Port set to {_port}.");
     }
 
+    private string PluginStatusText() => _pluginPaths.Count == 0
+        ? "No plugin loaded"
+        : $"{_pluginPaths.Count} DLL(s): {string.Join(", ", _pluginPaths.Select(Path.GetFileName))}";
+
+    private void LoadPluginDialog()
+    {
+        using var dlg = new OpenFileDialog
+        {
+            Filter = "Plugin DLL (*.dll)|*.dll",
+            Title = "Load a server-side DVC plugin (implements IServerDvcPlugin)",
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+        if (!_pluginPaths.Contains(dlg.FileName, StringComparer.OrdinalIgnoreCase))
+            _pluginPaths.Add(dlg.FileName);
+        _pluginStatus.Text = PluginStatusText();
+        Save();
+        RestartServer();
+        Balloon($"Loaded {Path.GetFileName(dlg.FileName)} — its channels open on the next connection.");
+    }
+
+    private void ClearPlugins()
+    {
+        if (_pluginPaths.Count == 0) return;
+        _pluginPaths.Clear();
+        _pluginStatus.Text = PluginStatusText();
+        Save();
+        RestartServer();
+    }
+
     private void SetLogLevel(LogLevel level)
     {
         _logLevel = level;
@@ -240,10 +280,13 @@ internal sealed class TrayApp : IDisposable
         PinServerCert(cert.GetCertHash(), _port);
         _cts = new CancellationTokenSource();
         var channels = _channels.Count > 0 ? _channels.ToArray() : DefaultChannels;
+        var plugins = _pluginPaths.Count > 0
+            ? DvcPluginHost.Load(_pluginPaths, _activityLog.CreateLogger("DvcPlugins"))
+            : null;
         _listener = new RdpListener(_bindAny ? IPAddress.Any : IPAddress.Loopback, _port, cert, _activityLog,
             dvcChannels: channels, rdpdrReads: null, dvcBehaviors: null,
             rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop,
-            vfsRoot: _sharedVfs);
+            vfsRoot: _sharedVfs, plugins: plugins);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
         UpdateStatus();
@@ -449,6 +492,8 @@ internal sealed class TrayApp : IDisposable
                 foreach (var c in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                     _channels.Add(c);
             }
+            if (k.GetValue("Plugins") is string plugins && plugins.Length > 0)
+                _pluginPaths.AddRange(plugins.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
             if (k.GetValue("Redir") is int r)
             {
                 _redir.Drives = (r & 1) != 0; _redir.Clipboard = (r & 2) != 0; _redir.Printers = (r & 4) != 0;
@@ -470,6 +515,7 @@ internal sealed class TrayApp : IDisposable
             k.SetValue("AutoConnect", _autoConnect ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("LogLevel", (int)_logLevel, RegistryValueKind.DWord);
             k.SetValue("Channels", string.Join(",", _channels), RegistryValueKind.String);
+            k.SetValue("Plugins", string.Join(";", _pluginPaths), RegistryValueKind.String);
             int r = (_redir.Drives ? 1 : 0) | (_redir.Clipboard ? 2 : 0) | (_redir.Printers ? 4 : 0)
                   | (_redir.SmartCards ? 8 : 0) | (_redir.ComPorts ? 16 : 0) | (_redir.Audio ? 32 : 0);
             k.SetValue("Redir", r, RegistryValueKind.DWord);

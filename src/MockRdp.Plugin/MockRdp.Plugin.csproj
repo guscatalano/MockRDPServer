@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- The stable contract a third-party server-side DVC plugin references. Keep this tiny and
+         dependency-free so plugins don't drag in the whole server. -->
+    <AssemblyName>MockRdp.Plugin</AssemblyName>
+  </PropertyGroup>
+
+</Project>

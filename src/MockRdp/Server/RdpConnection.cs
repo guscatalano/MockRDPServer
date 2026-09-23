@@ -22,9 +22,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     Dictionary<string, Dvc.Behavior>? dvcBehaviors = null,
     string[]? rdpdrLists = null, string[]? rdpdrWrites = null, bool desktop = false, bool logon = false,
     bool desktopDirect = false, Desktop.VfsNode? vfsRoot = null,
-    Dictionary<string, string>? dvcBridges = null)
+    Dictionary<string, string>? dvcBridges = null,
+    Rdp.DvcPluginHost? plugins = null)
 {
     private bool _nlaRequested;
+    // Server-side DVC plugins (loaded DLLs): channel name -> plugin; per-open, a pipe the plugin's
+    // RunAsync loop reads/writes, mirroring a real WTSVirtualChannelRead/Write agent.
+    private readonly Rdp.DvcPluginHost? _plugins = plugins;
+    private readonly Dictionary<uint, Rdp.DvcChannelPipe> _dvcHandlers = new();
     // DVC bridge: channel name -> "host:port" of a real agent (rdpeek-agent serve-tcp). When set, the
     // mock relays the channel's bytes to/from that endpoint instead of answering itself.
     private readonly Dictionary<string, string> _bridges = dvcBridges ?? new();
@@ -777,6 +782,11 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     msg.Version, _dvcChannelNames.Length);
                 foreach (var name in _dvcChannelNames)
                     await OpenDvcChannelAsync(name, ct);
+                // Also open every channel a loaded server-side DVC plugin serves.
+                if (_plugins is not null)
+                    foreach (var ch in _plugins.Channels)
+                        if (!_dvcChannelNames.Contains(ch, StringComparer.OrdinalIgnoreCase))
+                            await OpenDvcChannelAsync(ch, ct);
                 // In desktop mode, also open the Display Control channel so the client can drive
                 // resolution changes (MS-RDPEDISP). Harmless if the client declines it.
                 if (desktop)
@@ -799,6 +809,10 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                             await SendDvcAsync(p, ct);
                         LogChannel("DisplayControl", false, caps.Length, "caps PDU");
                         log.LogInformation("Display Control ready on DVC id {Id}: sent caps.", msg.ChannelId);
+                    }
+                    else if (_plugins?.ForChannel(name0) is { } plugin)
+                    {
+                        StartPluginChannel(plugin, msg.ChannelId, name0, ct);
                     }
                     else if (_dvcPendingSends.Remove(name0, out var queued))
                     {
@@ -826,6 +840,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
                     LogChannel(DvcLabel(closed), true, pdu.Length, "close");
                     log.LogInformation("DVC: client closed channel '{Name}' (id {Id}).", closed, msg.ChannelId);
                 }
+                if (_dvcHandlers.Remove(msg.ChannelId, out var closingPipe)) closingPipe.Complete();
                 _dvcReasm.Remove(msg.ChannelId);
                 break;
         }
@@ -865,6 +880,29 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         await SendDvcAsync(req, ct);
         LogChannel(DvcLabel(name), false, req.Length, $"create request (id {id})");
         log.LogInformation("DVC: create request for '{Name}' (id {Id}).", name, id);
+    }
+
+    /// <summary>Wire an opened plugin channel to its RunAsync loop: a pipe fed by the receive loop,
+    /// and a write delegate that fragments + sends. Runs the plugin on a background task.</summary>
+    private void StartPluginChannel(MockRdp.Plugin.IServerDvcPlugin plugin, uint channelId, string name, CancellationToken ct)
+    {
+        var pipe = new Rdp.DvcChannelPipe(name,
+            async (bytes, c) =>
+            {
+                foreach (var p in Dvc.BuildData(channelId, bytes)) await SendDvcAsync(p, c);
+                LogChannel(DvcLabel(name), false, bytes.Length, "plugin reply");
+            },
+            m => log.LogInformation("DVC plugin '{Plugin}' [{Ch}]: {Msg}", plugin.Name, name, m));
+
+        _dvcHandlers[channelId] = pipe;
+        log.LogInformation("DVC plugin '{Plugin}' serving '{Name}' (id {Id}).", plugin.Name, name, channelId);
+
+        _ = Task.Run(async () =>
+        {
+            try { await plugin.RunAsync(pipe, ct); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { log.LogWarning("DVC plugin '{Plugin}' [{Ch}] faulted: {Err}", plugin.Name, name, ex.Message); }
+        }, ct);
     }
 
     /// <summary>Reassembles fragmented data and echoes each complete message back on its channel.</summary>
@@ -916,6 +954,14 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         }
 
         var name = _dvcOpen[msg.ChannelId];
+
+        // Server-side DVC plugin: hand the complete message to its RunAsync loop (it writes replies back).
+        if (_dvcHandlers.TryGetValue(msg.ChannelId, out var pipe))
+        {
+            LogChannel(DvcLabel(name), true, complete.Length, "plugin request");
+            pipe.Feed(complete);
+            return;
+        }
 
         // DVC bridge: relay this channel's bytes to/from a real agent over TCP (no local answering).
         if (_bridges.ContainsKey(name))

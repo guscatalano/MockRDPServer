@@ -142,11 +142,13 @@ static (string Channel, string Value) SplitEq(string arg)
     return eq < 0 ? (arg, "") : (arg[..eq], arg[(eq + 1)..]);
 }
 
+var pluginPaths = new List<string>();
 for (int i = 0; i < args.Length - 1; i++)
 {
     switch (args[i])
     {
         case "--port": port = int.Parse(args[++i]); break;
+        case "--plugin": pluginPaths.Add(args[++i]); break;
         case "--bind": bind = IPAddress.Parse(args[++i]); break;
         case "--cert-out": certOut = args[++i]; break;
         case "--log-file": logFile = args[++i]; break;
@@ -201,9 +203,14 @@ if (dvcReplies.Count > 0 || dvcFaults.Count > 0)
         };
 }
 
+var pluginHost = pluginPaths.Count > 0
+    ? MockRdp.Rdp.DvcPluginHost.Load(pluginPaths, loggerFactory.CreateLogger("DvcPlugins"))
+    : null;
+
 using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannels, rdpdrReads, dvcBehaviors,
     rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"),
-    dvcBridges: dvcBridges.Count > 0 ? dvcBridges : null);
+    dvcBridges: dvcBridges.Count > 0 ? dvcBridges : null,
+    plugins: pluginHost);
 listener.Start();
 
 using var cts = new CancellationTokenSource();

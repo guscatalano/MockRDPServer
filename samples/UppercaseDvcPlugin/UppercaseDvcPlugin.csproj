@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reference the contract only. Private=false: don't ship MockRdp.Plugin.dll beside the plugin —
+         the mock already has it loaded, and sharing that one copy keeps the interface types identical. -->
+    <ProjectReference Include="..\..\src\MockRdp.Plugin\MockRdp.Plugin.csproj" Private="false" />
+  </ItemGroup>
+
+</Project>

@@ -208,6 +208,39 @@ across the negotiated VC chunk size).
   `--logon`, `--secure`, `--start-menu`, `--stats`, `--display`, `--tsclient`, `--dvcmon`
   (`--filter-app`), `--dvcapp`, `--demo`, `--demo-run`, `--scroll` (`--top`).
 
+## Server-side DVC plugins
+
+Load your own **server-side dynamic virtual channel** into the mock: a DLL that implements
+`IServerDvcPlugin` (from the tiny `MockRdp.Plugin` contract). The mock opens your channel(s) on
+every connection and hands each a read/write loop — **the same shape as a real in-session agent**
+looping on `WTSVirtualChannelRead` / `WTSVirtualChannelWrite`, so code you write here is a step away
+from running for real.
+
+```csharp
+public sealed class MyPlugin : IServerDvcPlugin
+{
+    public string Name => "my-plugin";
+    public IReadOnlyList<string> Channels => ["MYAPP::control"];
+
+    public async Task RunAsync(IDvcChannel ch, CancellationToken ct)
+    {
+        byte[]? msg;
+        while ((msg = await ch.ReadAsync(ct)) is not null)   // like WTSVirtualChannelRead
+            await ch.WriteAsync(Respond(msg), ct);           // like WTSVirtualChannelWrite
+    }
+}
+```
+
+Reference `src/MockRdp.Plugin` only, build a DLL, then load it:
+
+```pwsh
+dotnet build samples/UppercaseDvcPlugin -c Release              # the worked sample
+MockRdpCli --desktop --plugin samples/UppercaseDvcPlugin/bin/Release/net10.0/UppercaseDvcPlugin.dll
+```
+
+…or from the **tray**: *Server-side DVC plugin → Load plugin DLL…* (the path persists). `samples/UppercaseDvcPlugin`
+is a complete, copy-me example (opens `SAMPLE::upper`, greets, echoes upper-cased).
+
 ## CI & prebuilt binary
 
 `.github/workflows/ci.yml` builds and tests on every push/PR and publishes **self-contained
