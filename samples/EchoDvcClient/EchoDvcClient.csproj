@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A minimal CLIENT-side dynamic virtual channel (DVC) plugin — the companion to the server-side
+    samples/UppercaseDvcPlugin. It is a COM object (IWTSPlugin) that mstsc.exe activates out-of-process
+    via LocalServer32 (register with register.ps1, per-user, no admin). On the shared channel it sends
+    a line and prints whatever the server sends back. Together the two samples show a full both-ends
+    DVC round-trip against the mock. Self-contained: references nothing.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>EchoDvcClient</RootNamespace>
+    <AssemblyName>EchoDvcClient</AssemblyName>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <!-- Built-in COM interop (CCW via CoRegisterClassObject), no .comhost.dll. -->
+    <EnableComHosting>false</EnableComHosting>
+  </PropertyGroup>
+
+</Project>

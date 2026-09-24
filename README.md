@@ -273,6 +273,24 @@ MockRdpCli --desktop --plugin samples/UppercaseDvcPlugin/bin/Release/net10.0/Upp
 …or from the **tray**: *Server-side DVC plugin → Load plugin DLL…* (the path persists). `samples/UppercaseDvcPlugin`
 is a complete, copy-me example (opens `SAMPLE::upper`, greets, echoes upper-cased).
 
+### Both ends of a DVC, in one command
+
+A DVC has two halves — a **server** side and a **client** side — and the mock lets you exercise both
+locally, no RDP infrastructure. The paired samples:
+
+- **server**: `samples/UppercaseDvcPlugin` — `IServerDvcPlugin`, loaded by the mock.
+- **client**: `samples/EchoDvcClient` — a minimal **`IWTSPlugin`** COM plugin that `mstsc` loads
+  (registered per-user, **no admin**). It opens `SAMPLE::upper`, sends a line, and prints the reply.
+
+```powershell
+tools\demo-dvc.ps1        # builds both + the mock, registers the client, connects mstsc, tails the log
+```
+
+You watch the round-trip live: the client sends `hello from the client sample`, the server echoes
+`HELLO FROM THE CLIENT SAMPLE`. Ctrl+C stops the mock and unregisters the client. Copy the two
+`samples/*` folders (pick your own channel name + a fresh CLSID for the client) and you have a
+working both-ends DVC to build on.
+
 ### Fail DVCs from inside the session
 
 Open **DVC Chaos** from the Start menu (or the tray's desktop) to break channels live — for testing
