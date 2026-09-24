@@ -28,7 +28,8 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     bool allowStandardRdpSecurity = true,
     uint preferredRdpEncryption = Rdp.StandardSecurity.Method128Bit,
     bool rdpHighEncryption = false,
-    bool enableNla = false)
+    bool enableNla = false,
+    bool enableRdsAad = false)
 {
     private bool _nlaRequested;
     // The security layer selected in X.224 negotiation. Ssl = TLS (enhanced security); Rdp =
@@ -223,8 +224,23 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         // not offer TLS (a policy-locked mstsc forced off SSL, or FreeRDP `/sec:rdp`) falls back to
         // Standard RDP Security when allowed; otherwise it is rejected (TLS-only posture).
         bool offersRdstls = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.RdsTls) != 0;
+        bool offersAad = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.RdsAad) != 0;
         bool offersHybrid = cr.HasNegReq && (cr.RequestedProtocols & (RdpNegProtocol.Hybrid | RdpNegProtocol.HybridEx)) != 0;
         bool offersTls = cr.HasNegReq && (cr.RequestedProtocols & RdpNegProtocol.Ssl) != 0;
+
+        // RDS-AAD / Microsoft Entra auth (MS-RDPBCGR 2.2.18): TLS + a plain-JSON token exchange. Opt-in
+        // (`enableRdsAad`); the mock issues a nonce and accepts any assertion without verifying it
+        // against Entra (a structural fake — it can't, and for a test host needn't).
+        if (offersAad && enableRdsAad)
+        {
+            _selectedProtocol = RdpNegProtocol.RdsAad;
+            await WriteAsync(Cotp.BuildConnectionConfirm(RdpNegProtocol.RdsAad, negRspFlags: 0x01), ct);
+            log.LogInformation("Sent Connection Confirm selecting PROTOCOL_RDSAAD (Entra auth); starting TLS + AAD.");
+            if (!await EstablishTlsAsync(ct)) return;
+            if (!await RunRdsAadAsync(ct)) return;
+            await RunMcsAsync(ct);
+            return;
+        }
 
         // NLA / CredSSP (MS-CSSP over TLS). Opt-in (`enableNla`): credentials are validated by Windows
         // SSPI against this host, so it is off by default to keep the HYBRID→TLS downgrade for clients
@@ -431,6 +447,94 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
         var w = new System.Buffers.ArrayBufferWriter<byte>();
         nego.Unwrap(data, w, out _);
         return w.WrittenSpan.ToArray();
+    }
+
+    /// <summary>Runs the RDS-AAD / Entra auth exchange over TLS (MS-RDPBCGR 5.4.5.4): send a Server
+    /// Nonce PDU, read the client's Authentication Request (a JWT "rdp_assertion" whose payload carries
+    /// the Entra access token), and reply with an Authentication Result. The mock does NOT verify the
+    /// token against Entra — it decodes the identity claim for display and accepts. Returns false on a
+    /// closed/garbled exchange.</summary>
+    private async Task<bool> RunRdsAadAsync(CancellationToken ct)
+    {
+        State = ConnectionState.Negotiating;
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+        await WriteJsonPduAsync($"{{\"ts_nonce\":\"{nonce}\"}}", ct);
+        log.LogInformation("RDS-AAD: sent Server Nonce PDU.");
+
+        var request = await ReadJsonPduAsync(ct);
+        if (request is null) { log.LogWarning("RDS-AAD: closed before Authentication Request."); return false; }
+
+        string user = ExtractAadUser(request);
+        _clientUser = user;
+        _clientDomain = "";
+        _nlaRequested = true;   // token auth completed → boot straight to the desktop
+        log.LogInformation("RDS-AAD: accepted assertion for '{User}' (token NOT verified — mock host).",
+            string.IsNullOrEmpty(user) ? "(unknown)" : user);
+
+        await WriteJsonPduAsync("{\"authentication_result\":\"0\"}", ct);   // S_OK
+        log.LogInformation("RDS-AAD: sent Authentication Result (S_OK).");
+        return true;
+    }
+
+    /// <summary>Pulls a best-effort user identity out of an RDS-AAD Authentication Request: the
+    /// "rdp_assertion" JWT's payload carries "at" (the Entra access token), whose claims hold the UPN.</summary>
+    private static string ExtractAadUser(string requestJson)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(requestJson);
+            if (!doc.RootElement.TryGetProperty("rdp_assertion", out var a)) return "";
+            var assertionClaims = Jwt.DecodeClaims(a.GetString() ?? "");
+            return assertionClaims.TryGetValue("at", out var at) && !string.IsNullOrEmpty(at)
+                ? Jwt.UserFromClaims(Jwt.DecodeClaims(at))     // identity lives in the access token
+                : Jwt.UserFromClaims(assertionClaims);         // fallback: claim inline on the assertion
+        }
+        catch { return ""; }
+    }
+
+    // RDS-AAD PDUs are UTF-8 JSON written straight into the TLS stream, NUL-terminated (no length
+    // prefix; TLS records frame them). MS-RDPBCGR 2.2.18.
+    private Task WriteJsonPduAsync(string json, CancellationToken ct)
+    {
+        var body = System.Text.Encoding.UTF8.GetBytes(json);
+        var buf = new byte[body.Length + 1];   // trailing NUL
+        body.CopyTo(buf, 0);
+        return WriteAsync(buf, ct);
+    }
+
+    private async Task<string?> ReadJsonPduAsync(CancellationToken ct)
+    {
+        var acc = new List<byte>(4096);
+        var chunk = new byte[8192];
+        while (acc.Count < 1_000_000)
+        {
+            int n;
+            try { n = await _stream.ReadAsync(chunk, ct); }
+            catch (IOException) { return null; }
+            if (n == 0) break;
+
+            for (int i = 0; i < n; i++)
+            {
+                if (chunk[i] == 0)                                 // NUL terminator → complete
+                    return System.Text.Encoding.UTF8.GetString(acc.ToArray());
+                acc.Add(chunk[i]);
+            }
+            if (TryParseJson(acc, out var whole)) return whole;    // fallback: a client without a NUL
+        }
+        return acc.Count > 0 && TryParseJson(acc, out var s) ? s : null;
+    }
+
+    private static bool TryParseJson(List<byte> bytes, out string json)
+    {
+        json = "";
+        try
+        {
+            var s = System.Text.Encoding.UTF8.GetString(bytes.ToArray());
+            using var _ = System.Text.Json.JsonDocument.Parse(s);   // throws if incomplete
+            json = s;
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>Reads one DER-encoded TSRequest from the TLS stream (tag + length + content).</summary>
@@ -763,6 +867,7 @@ public sealed class RdpConnection(TcpClient tcp, X509Certificate2 cert, ILogger 
     private string SecurityDescription() => _selectedProtocol switch
     {
         RdpNegProtocol.Hybrid or RdpNegProtocol.HybridEx => "TLS + NLA (CredSSP)",
+        RdpNegProtocol.RdsAad => "TLS + RDS-AAD (Entra token, unverified)",
         RdpNegProtocol.RdsTls => "RDSTLS (TLS + RDSTLS auth)",
         RdpNegProtocol.Rdp when _rdpEncryption =>
             $"Standard RDP Security · {StandardSecurity.MethodName(_encMethod)} · " +

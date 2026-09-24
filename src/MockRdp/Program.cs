@@ -232,7 +232,7 @@ using var listener = new RdpListener(bind, port, cert, loggerFactory, dvcChannel
     rdpdrLists, rdpdrWrites, desktop, logon, desktopDirect: args.Contains("--no-logon"),
     dvcBridges: dvcBridges.Count > 0 ? dvcBridges : null,
     plugins: pluginHost, preferredRdpEncryption: preferredEnc, rdpHighEncryption: highEnc,
-    enableNla: args.Contains("--nla"));
+    enableNla: args.Contains("--nla"), enableRdsAad: args.Contains("--aad"));
 listener.Start();
 
 using var cts = new CancellationTokenSource();

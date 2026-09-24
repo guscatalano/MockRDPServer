@@ -48,7 +48,7 @@ Grab both from the [latest release](https://github.com/guscatalano/MockRDPServer
 | M6 | Clipboard virtual channel (CLIPRDR) | ✅ done |
 | M7 | Dynamic virtual channels (DRDYNVC / MS-RDPEDYC) | ✅ done |
 | M8 | Drive redirection read/list/write (rdpdr / MS-RDPEFS) + scripted/fault DVCs | ✅ done |
-| M9 | Security layers: Standard RDP Security (RC4 40/56/128, Low/High), RDSTLS, NLA/CredSSP | ✅ done |
+| M9 | Security layers: Standard RDP Security (RC4 40/56/128, Low/High), RDSTLS, NLA/CredSSP, RDS-AAD | ✅ done |
 
 All originally planned milestones are complete: a real RDP client connects end-to-end,
 sees rendered graphics, drives the screen with keyboard/mouse, and exchanges clipboard
@@ -79,6 +79,15 @@ the CredSSP TSRequest handshake (MS-CSSP) with the public-key channel binding. T
 handshake and message sealing are done by Windows **SSPI**, so credentials are validated
 against **this host** — use a local account (loopback works with the current user). Without
 `--nla` a HYBRID offer is downgraded to plain TLS.
+
+**RDS-AAD / Microsoft Entra auth** (`PROTOCOL_RDSAAD`, MS-RDPBCGR 2.2.18) is supported with
+`--aad` (off by default): TLS then the plain-JSON exchange — the server sends a nonce
+(`{"ts_nonce":…}`), the client replies with an `rdp_assertion` JWT carrying its Entra access
+token, the server replies `{"authentication_result":"0"}`. The mock **accepts any token
+without verifying it against Entra** (a structural fake — it decodes the UPN claim for
+display only); the protocol puts all validation on the server by policy and has no
+server-side proof-of-possession, so this is sound. A real Entra client still needs a token
+from Azure (browser/webview), so this is exercised by a synthetic client in tests.
 
 ## How it fits together
 

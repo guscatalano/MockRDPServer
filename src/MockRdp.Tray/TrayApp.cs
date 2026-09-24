@@ -46,6 +46,7 @@ internal sealed class TrayApp : IDisposable
     private uint _encMethod = MockRdp.Rdp.StandardSecurity.Method128Bit;  // preferred RC4 method for PROTOCOL_RDP
     private bool _encHigh;                  // ENCRYPTION_LEVEL_HIGH (encrypt both directions)
     private bool _nla;                      // NLA / CredSSP (validated by SSPI against this host)
+    private bool _aad;                      // RDS-AAD / Entra auth (token accepted without verification)
     private readonly HashSet<string> _channels = new(DefaultChannels, StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _pluginPaths = new();   // server-side DVC plugin DLLs to load
     private ToolStripMenuItem _pluginStatus = null!;
@@ -211,6 +212,10 @@ internal sealed class TrayApp : IDisposable
             v => { _nla = v; Save(); RestartServer(); },
             "Accept PROTOCOL_HYBRID (NLA). Credentials are validated by Windows against THIS machine — "
             + "use a local account. Off: a HYBRID request is downgraded to plain TLS.");
+        AddToggleTo(security, "RDS-AAD / Entra auth (accept any token)", () => _aad,
+            v => { _aad = v; Save(); RestartServer(); },
+            "Accept PROTOCOL_RDSAAD (Microsoft Entra auth). The mock issues a nonce and accepts the "
+            + "client's token WITHOUT verifying it against Entra — a structural fake for testing.");
         _menu.Items.Add(security);
 
         _menu.Items.Add(new ToolStripSeparator());
@@ -342,7 +347,8 @@ internal sealed class TrayApp : IDisposable
             dvcChannels: channels, rdpdrReads: null, dvcBehaviors: null,
             rdpdrLists: null, rdpdrWrites: null, desktop: true, logon: true, desktopDirect: _bootToDesktop,
             vfsRoot: _sharedVfs, plugins: plugins,
-            preferredRdpEncryption: _encMethod, rdpHighEncryption: _encHigh, enableNla: _nla);
+            preferredRdpEncryption: _encMethod, rdpHighEncryption: _encHigh, enableNla: _nla,
+            enableRdsAad: _aad);
         _listener.Start();
         _ = _listener.AcceptLoopAsync(_cts.Token);
         UpdateStatus();
@@ -604,6 +610,7 @@ internal sealed class TrayApp : IDisposable
             if (k.GetValue("EncMethod") is int em) _encMethod = (uint)em;
             _encHigh = (k.GetValue("EncHigh") as int?) == 1;
             _nla = (k.GetValue("Nla") as int?) == 1;
+            _aad = (k.GetValue("Aad") as int?) == 1;
             if (k.GetValue("Channels") is string csv && csv.Length > 0)
             {
                 _channels.Clear();
@@ -636,6 +643,7 @@ internal sealed class TrayApp : IDisposable
             k.SetValue("EncMethod", (int)_encMethod, RegistryValueKind.DWord);
             k.SetValue("EncHigh", _encHigh ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("Nla", _nla ? 1 : 0, RegistryValueKind.DWord);
+            k.SetValue("Aad", _aad ? 1 : 0, RegistryValueKind.DWord);
             k.SetValue("Channels", string.Join(",", _channels), RegistryValueKind.String);
             k.SetValue("Plugins", string.Join(";", _pluginPaths), RegistryValueKind.String);
             k.SetValue("FreeRdpPath", _freeRdpPath, RegistryValueKind.String);
