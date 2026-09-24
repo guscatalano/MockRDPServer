@@ -454,12 +454,27 @@ internal sealed class TrayApp : IDisposable
 
     // A loopback FQDN (public-DNS wildcard: 127-0-0-1.nip.io → 127.0.0.1). mstsc's RDS-AAD path
     // wants a fully-qualified name, not an IP or "localhost".
-    /// <summary>The FQDN mstsc's RDS-AAD path connects to. mstsc will NOT run the Entra flow for a name
-    /// that resolves to loopback (it collapses to 127.0.0.1), so we prefer the machine's LAN IPv4 as an
-    /// nip.io name — e.g. 192.168.6.113 → "192-168-6-113.nip.io", a real remote-looking host — and only
-    /// fall back to the loopback form when there's no LAN address.</summary>
+    /// <summary>The FQDN mstsc's RDS-AAD path connects to. mstsc won't run the Entra flow for a name that
+    /// resolves to loopback, so we prefer the machine's own DNS name — on an Entra/domain-joined box a
+    /// real FQDN with a domain suffix, exactly what the AAD scope expects — then fall back to the LAN
+    /// IPv4 as an nip.io name, then loopback.</summary>
     private static string AadFqdn()
     {
+        // 1. The machine's own (fully-qualified where joined) DNS name.
+        try
+        {
+            var host = System.Net.Dns.GetHostName();
+            try
+            {
+                var fqdn = System.Net.Dns.GetHostEntry(host).HostName;
+                if (!string.IsNullOrWhiteSpace(fqdn)) return fqdn;
+            }
+            catch { /* fall through to the bare hostname */ }
+            if (!string.IsNullOrWhiteSpace(host)) return host;
+        }
+        catch { /* fall through */ }
+
+        // 2. The LAN IPv4 as an nip.io name (e.g. 192.168.6.113 → 192-168-6-113.nip.io).
         try
         {
             foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
@@ -477,6 +492,7 @@ internal sealed class TrayApp : IDisposable
             }
         }
         catch { /* fall through */ }
+
         return "127-0-0-1.nip.io";
     }
 
