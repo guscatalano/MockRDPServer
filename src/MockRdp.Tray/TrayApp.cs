@@ -80,18 +80,38 @@ internal sealed class TrayApp : IDisposable
     {
         LoadSettings();
         _activityLog.MinLevel = _logLevel;
-        _icon = new NotifyIcon { Icon = Branding.MakeIcon(16), Visible = true };
+        _icon = new NotifyIcon { Icon = Branding.MakeIcon(16), Text = $"Mock RDP {AppVersion}", Visible = true };
         BuildMenu();
         _icon.ContextMenuStrip = _menu;
         _icon.DoubleClick += (_, _) => Connect(Presets[0]);
         StartServer();
-        Balloon($"Mock RDP is running on {(_bindAny ? "0.0.0.0" : "127.0.0.1")}:{_port}. Right-click the tray icon to connect.");
+        Balloon($"Mock RDP {AppVersion} running on {(_bindAny ? "0.0.0.0" : "127.0.0.1")}:{_port}. Right-click the tray icon to connect.");
     }
 
     // ── menu ────────────────────────────────────────────────────────────────
 
+    /// <summary>The app version (from the assembly, stamped from the git tag at release). "dev" for a
+    /// local build with no version set.</summary>
+    private static string AppVersion
+    {
+        get
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            var attr = (System.Reflection.AssemblyInformationalVersionAttribute?)Attribute.GetCustomAttribute(
+                asm, typeof(System.Reflection.AssemblyInformationalVersionAttribute));
+            var v = attr?.InformationalVersion ?? asm.GetName().Version?.ToString() ?? "";
+            int plus = v.IndexOf('+');                       // strip build metadata (+gitsha)
+            if (plus >= 0) v = v[..plus];
+            return string.IsNullOrEmpty(v) || v.StartsWith("1.0.0") ? "dev" : "v" + v;
+        }
+    }
+
     private void BuildMenu()
     {
+        // A non-interactive header so you can tell at a glance which build is running.
+        _menu.Items.Add(new ToolStripMenuItem($"Mock RDP  ·  {AppVersion}") { Enabled = false });
+        _menu.Items.Add(new ToolStripSeparator());
+
         _statusItem = new ToolStripMenuItem("Server: starting…") { Enabled = false };
         _menu.Items.Add(_statusItem);
 

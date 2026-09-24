@@ -25,10 +25,19 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      # Stamp the tag (minus the leading v) as the assembly version so the tray can show it.
+      - name: Derive version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ github.event.inputs.tag }}' } else { '${{ github.ref_name }}' }
+          "ver=$($tag -replace '^v','')" >> $env:GITHUB_OUTPUT
+
       - name: Publish self-contained CLI (console)
         run: >
           dotnet publish src/MockRdp -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.ver }}
           -o publish
 
       # The tray app is the run-this entry point (everything's in the menu). Same folder,
@@ -37,6 +46,7 @@ jobs:
         run: >
           dotnet publish src/MockRdp.Tray -c Release -r win-x64 --self-contained true
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=${{ steps.ver.outputs.ver }}
           -o publish
 
       # Published as release assets so consumers (RDPeek) can fetch stable URLs:
