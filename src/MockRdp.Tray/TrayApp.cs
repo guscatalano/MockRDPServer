@@ -502,11 +502,11 @@ internal sealed class TrayApp : IDisposable
     /// only completes the nonce exchange — the Activity log shows how far it got.</summary>
     private void ConnectRdsAad(Preset p)
     {
-        // A LAN FQDN is what makes mstsc engage the Entra flow (it won't for a name that resolves to
-        // loopback — it collapses that to 127.0.0.1). But that means the mock is reachable on the LAN,
-        // which the user opts into via "Listen on all interfaces (LAN)". Never force it: if LAN is off,
-        // stay on the loopback FQDN and tell the user how to get the real one.
-        string fqdn = _bindAny ? AadFqdn() : "127-0-0-1.nip.io";
+        // The AAD token is scoped to the TARGET DEVICE — mstsc uses `full address` as that identity
+        // (it goes into the scope .../name/<host>/user_impersonation), which must be this host's own
+        // (Entra) device name. `alternate full address` is where mstsc actually connects, so we
+        // identify as the host but connect over loopback — no LAN exposure required.
+        var fqdn = AadFqdn();
 
         if (!_aad)
         {
@@ -520,8 +520,8 @@ internal sealed class TrayApp : IDisposable
         try
         {
             using var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(CertPath);
-            PinCert(cert.GetCertHash(), fqdn);
-            PinCert(cert.GetCertHash(), $"{fqdn}:{_port}");
+            foreach (var s in new[] { fqdn, $"{fqdn}:{_port}", "127.0.0.1", $"127.0.0.1:{_port}" })
+                PinCert(cert.GetCertHash(), s);
         }
         catch { /* best-effort — mstsc will prompt to trust if pinning failed */ }
 
@@ -530,13 +530,10 @@ internal sealed class TrayApp : IDisposable
             var path = Path.Combine(Path.GetTempPath(), "mock-rdsaad.rdp");
             File.WriteAllText(path, RdpAad(p, fqdn), Encoding.ASCII);
             Process.Start(new ProcessStartInfo("mstsc.exe", $"\"{path}\"") { UseShellExecute = true });
-
-            var msg = $"Launched RDS-AAD → {fqdn}:{_port}. Completing it needs a real Entra token from "
-                + "Azure (a local mock can't mint one), so it stops after the nonce — watch the Activity log.";
-            if (!_bindAny)
-                msg += "\n\nNote: this is a loopback name, so mstsc may skip the Entra flow. For a real FQDN "
-                    + "it will use, enable 'Listen on all interfaces (LAN)' first (exposes the mock on your LAN).";
-            Balloon(msg);
+            Balloon($"Launched RDS-AAD — target device '{fqdn}' (this host), connecting over loopback. "
+                + $"mstsc requests the Entra token for '{fqdn}', then connects to 127.0.0.1. Watch the "
+                + "Activity log. On an Entra-joined box (where that's this device's Entra name), Azure "
+                + "should mint the token — no LAN exposure needed.");
         }
         catch (Exception ex)
         {
@@ -548,7 +545,8 @@ internal sealed class TrayApp : IDisposable
     private string RdpAad(Preset p, string fqdn)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"full address:s:{fqdn}:{_port}");
+        sb.AppendLine($"full address:s:{fqdn}:{_port}");                  // target-device identity (this host)
+        sb.AppendLine($"alternate full address:s:127.0.0.1:{_port}");     // actual connection: loopback
         sb.AppendLine("enablerdsaadauth:i:1");   // make mstsc offer PROTOCOL_RDSAAD (Entra auth)
         sb.AppendLine("targetisaadjoined:i:1");
         sb.AppendLine("authentication level:i:2");
