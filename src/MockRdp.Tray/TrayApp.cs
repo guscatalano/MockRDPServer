@@ -111,6 +111,13 @@ internal sealed class TrayApp : IDisposable
             free.DropDownItems.Add(new ToolStripMenuItem(preset.Label, null, (_, _) => ConnectFreeRdp(preset)));
         _menu.Items.Add(free);
 
+        // RDS-AAD path: mstsc needs an FQDN + enablerdsaadauth to offer PROTOCOL_RDSAAD. This builds
+        // an .rdp against a loopback FQDN, pins the cert for it, and turns on the server's AAD path.
+        var aad = new ToolStripMenuItem("Connect with RDS-AAD (Entra)");
+        foreach (var preset in Presets)
+            aad.DropDownItems.Add(new ToolStripMenuItem(preset.Label, null, (_, _) => ConnectRdsAad(preset)));
+        _menu.Items.Add(aad);
+
         // Port — presets plus a custom entry.
         var portMenu = new ToolStripMenuItem("Port");
         foreach (var p in PortPresets)
@@ -360,15 +367,19 @@ internal sealed class TrayApp : IDisposable
     private static void PinServerCert(byte[] certHash, int port)
     {
         foreach (var server in new[] { "127.0.0.1", "localhost", $"127.0.0.1:{port}", $"localhost:{port}" })
+            PinCert(certHash, server);
+    }
+
+    /// <summary>Pins a cert hash for one server address so mstsc accepts it without a prompt.</summary>
+    private static void PinCert(byte[] certHash, string server)
+    {
+        try
         {
-            try
-            {
-                using var k = Registry.CurrentUser.CreateSubKey(
-                    $@"Software\Microsoft\Terminal Server Client\Servers\{server}");
-                k?.SetValue("CertHash", certHash, RegistryValueKind.Binary);
-            }
-            catch { /* best-effort */ }
+            using var k = Registry.CurrentUser.CreateSubKey(
+                $@"Software\Microsoft\Terminal Server Client\Servers\{server}");
+            k?.SetValue("CertHash", certHash, RegistryValueKind.Binary);
         }
+        catch { /* best-effort */ }
     }
 
     private void RestartServer()
@@ -441,6 +452,72 @@ internal sealed class TrayApp : IDisposable
         }
     }
 
+    // A loopback FQDN (public-DNS wildcard: 127-0-0-1.nip.io → 127.0.0.1). mstsc's RDS-AAD path
+    // wants a fully-qualified name, not an IP or "localhost".
+    private const string AadFqdn = "127-0-0-1.nip.io";
+
+    /// <summary>Connect via the RDS-AAD (Entra) path: ensure the server's AAD path is on, pin the cert
+    /// for the loopback FQDN, and launch mstsc with an enablerdsaadauth .rdp. A real Entra token is
+    /// still minted by mstsc against Azure, so a local mock only completes the nonce exchange — the
+    /// Activity log shows how far it got.</summary>
+    private void ConnectRdsAad(Preset p)
+    {
+        if (!_aad)
+        {
+            _aad = true;
+            Save();
+            foreach (ToolStripItem d in FindSecurityDropDown())
+                if (d is ToolStripMenuItem mi && mi.Text?.StartsWith("RDS-AAD") == true) mi.Checked = true;
+        }
+        if (Running) RestartServer(); else StartServer();
+
+        try
+        {
+            using var cert = new System.Security.Cryptography.X509Certificates.X509Certificate2(CertPath);
+            PinCert(cert.GetCertHash(), AadFqdn);
+            PinCert(cert.GetCertHash(), $"{AadFqdn}:{_port}");
+        }
+        catch { /* best-effort — mstsc will prompt to trust if pinning failed */ }
+
+        try
+        {
+            var path = Path.Combine(Path.GetTempPath(), "mock-rdsaad.rdp");
+            File.WriteAllText(path, RdpAad(p), Encoding.ASCII);
+            Process.Start(new ProcessStartInfo("mstsc.exe", $"\"{path}\"") { UseShellExecute = true });
+            Balloon($"Launched RDS-AAD → {AadFqdn}:{_port}. mstsc offers PROTOCOL_RDSAAD; watch the "
+                + "Activity log for the nonce exchange. Completing it needs a real Entra token from Azure.");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Couldn't launch Remote Desktop:\n" + ex.Message, "Mock RDP",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private string RdpAad(Preset p)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"full address:s:{AadFqdn}:{_port}");
+        sb.AppendLine("enablerdsaadauth:i:1");   // make mstsc offer PROTOCOL_RDSAAD (Entra auth)
+        sb.AppendLine("targetisaadjoined:i:1");
+        sb.AppendLine("authentication level:i:2");
+        sb.AppendLine("prompt for credentials:i:0");
+        sb.AppendLine("screen mode id:i:1");
+        sb.AppendLine($"desktopwidth:i:{p.Width}");
+        sb.AppendLine($"desktopheight:i:{p.Height}");
+        if (_redir.Drives) sb.AppendLine("drivestoredirect:s:*");
+        return sb.ToString();
+    }
+
+    /// <summary>The Security submenu's dropdown items (for keeping toggles in sync when set in code).</summary>
+    private IEnumerable<ToolStripItem> FindSecurityDropDown()
+    {
+        foreach (ToolStripItem top in _menu.Items)
+            if (top is ToolStripMenuItem { Text: "Security" } sec)
+                return sec.DropDownItems.Cast<ToolStripItem>();
+        return [];
+    }
+
     /// <summary>Find FreeRDP: a remembered path, then PATH, then ask the user to locate it.</summary>
     private string? ResolveFreeRdp()
     {
@@ -484,7 +561,7 @@ internal sealed class TrayApp : IDisposable
         var sb = new StringBuilder();
         sb.AppendLine($"full address:s:127.0.0.1:{_port}");
         sb.AppendLine("authentication level:i:2");
-        sb.AppendLine("enablecredsspsupport:i:0");   // mock is TLS-only — never request NLA/CredSSP
+        sb.AppendLine("enablecredsspsupport:i:0");   // plain TLS connect — NLA has its own path (Security menu)
         sb.AppendLine("prompt for credentials:i:0");
         sb.AppendLine("screen mode id:i:1");
         sb.AppendLine($"desktopwidth:i:{p.Width}");
