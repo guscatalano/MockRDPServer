@@ -53,8 +53,21 @@ $rdpArgs = @(
     "/timeout:$([int]($TimeoutSec * 1000))"
 )
 
-Write-Host "Launching: wfreerdp $($rdpArgs -join ' ')"
-$proc = Start-Process -FilePath "wfreerdp" -ArgumentList $rdpArgs -PassThru -WindowStyle Minimized
+# Resolve wfreerdp robustly: the choco shim isn't always on PATH in the CI step that runs this,
+# so fall back to the known chocolatey install locations before giving up.
+$wfreerdp = (Get-Command wfreerdp -ErrorAction SilentlyContinue).Source
+if (-not $wfreerdp) {
+    foreach ($cand in @(
+            (Join-Path ($env:ChocolateyInstall ?? "C:\ProgramData\chocolatey") "bin\wfreerdp.exe"),
+            "C:\ProgramData\chocolatey\bin\wfreerdp.exe",
+            "C:\ProgramData\chocolatey\lib\freerdp.portable\tools\wfreerdp.exe")) {
+        if ($cand -and (Test-Path $cand)) { $wfreerdp = $cand; break }
+    }
+}
+if (-not $wfreerdp) { Write-Host "FAIL: wfreerdp not found on PATH or in the chocolatey install."; exit 1 }
+
+Write-Host "Launching: $wfreerdp $($rdpArgs -join ' ')"
+$proc = Start-Process -FilePath $wfreerdp -ArgumentList $rdpArgs -PassThru -WindowStyle Minimized
 
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while (-not $proc.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
